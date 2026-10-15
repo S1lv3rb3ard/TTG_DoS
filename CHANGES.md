@@ -1,7 +1,37 @@
 # Changes
 
-The changes were checked against a NumPy port of the tight-binding Hamiltonian (not
-included), at θ = (−1.4°, 0°, 2.8°), W = 0.4324 and L = 5|b|. MATLAB was not run.
+The changes were first checked against a NumPy port of the tight-binding Hamiltonian (not
+included), at θ = (−1.4°, 0°, 2.8°), W = 0.4324 and L = 5|b|. On 2026-10-15 they were run in
+MATLAB R2026a Update 5 with `ttg_smoke.m` (all checks pass; see section 0).
+
+## 0. MATLAB run of 2026-10-15 (`ttg_smoke.m`) and a new warning in `getMoireBasis`
+
+`ttg_smoke.m` (CPU, no parallel pool, about a minute) checks, at the parameters above:
+
+| check | result |
+|---|---|
+| monolayer Dirac energy, ħv_F | 3.170 meV, 5.5767 eV·Å |
+| H(q) Hermitian | 0 |
+| DoF closed under G → −G (per layer) | 5075 of 5075 sites |
+| H(−q) = Π conj(H(q)) Πᵀ | 9.0e-16 |
+| K′ model at −q = conj(K model at q) | 6.2e-17 |
+| start vectors: grid 1, 2, 3 on layer 3, 2, 1 only | yes |
+| shift identity, layer 2, n = (1, 0), 24 moments | 5.9e-10 |
+| sum rule Σ w μ₀ = exact site count, L = 8\|b\| | 0.145666 = 0.145666 |
+| BM Dirac points of layers 1, 3 at K₁, K₃ | 0 |
+
+The G → −G match must include the layer: a vector (0, 0, G₃) is the index of a layer-1 site
+and of a layer-2 site.
+
+**New warning (`TTG_DoS:missingStartSites`).** A start site (B₁n, −B₂n, 0) etc. is absent
+from DoF when one of its components has |B_l n| ≥ L. `getMoireBasis` used to drop such sites
+silently. At the `testDoS.m` setting L = 5|b| (W = 0.4324), 36 of 121 grid-1 sites and 32 of
+121 grid-2 sites are missing, and Σ w μ₀ is 0.1186 instead of 0.1457, a 19% loss of mass
+from holes in the tiling of the W-disk. At L = 8|b| all sites are present (5.57|b| is needed). The cluster
+setting L = 25|b| covers every admissible W < 0.85 at both cluster angle sets (at most
+23.3|b| is needed, at θ = (−√3/2°, 0°, √2/2°) and W = 0.85).
+The exact reference for the sum rule is the site count, Σ_X 2·w_X·#{n : |C_X n| < W}; the
+area estimate 2πW²/|Γ*| = 0.1559 differs from it by lattice-point counting.
 
 ## 1. Fix: layer 2 was sampled only at its centre (`Geometry/getMoireBasis.m`)
 

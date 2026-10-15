@@ -187,7 +187,11 @@ the margin or use the maximum of ‖H(q)‖∞ over the grid.
 - **Time reversal.** `H(-q)` should equal `Pi*conj(H(q))*Pi.'`, where `Pi` maps each
   DoF row to its G → −G partner. Compare the maximum absolute difference with machine
   precision.
-- **Sum rule.** Σ_X weights · μ₀ ≈ 2πW²/|Γ*| once L is large enough.
+- **Sum rule.** Σ_X weights · μ₀ equals the exact count Σ_X 2·w_X·#{n : |C_X n| < W}
+  once L is large enough that every start site is in DoF (≈ 2πW²/|Γ*| up to lattice-point
+  counting). `getMoireBasis` warns (`TTG_DoS:missingStartSites`) when sites are missing,
+  e.g. at the `testDoS.m` value L = 5|b|.
+- **`ttg_smoke.m`** runs these checks (except convergence) on the CPU in about a minute.
 - **Convergence.** Compare the DoS across `Nsweep`, across `Puse`, and across W and L, as
   in Figs. 6–7 of the paper.
 - **Monolayer.** `getMonolayerDirac(stack)` should give a Dirac energy of 3.17 meV and

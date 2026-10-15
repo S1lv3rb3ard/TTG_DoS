@@ -1,7 +1,7 @@
 theta = [-1.4, 0, 2.8];
         %-sqrt(3)/2, 0, sqrt(2)/2];
 NumStepW = 4;
-NumStepL = 5;
+NumStepL = 5;   % quick test: start sites with |B_l n| >= L are missing (getMoireBasis warns); 8 suffices at W = 0.4324
 N = 2;
 P = 4e3;
 

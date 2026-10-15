@@ -17,6 +17,10 @@ function basis = getMoireBasis(stack, DoF, W)
 %   therefore sampled only at its centre, and X = 2 reused the X = 1 set (layer 3 again).
 %   Layer 2 could equally use C23 with sites (0, 0, -B3*n), but its q-grid in getMoireBZ is
 %   on C12, so C12 is used here.
+%
+%   Every wanted site must be in DoF. It is missing when one of its reciprocal components
+%   has |B_l*n| >= L, which happens when L is small compared with W/theta (e.g. the
+%   NumStepL = 5 of testDoS.m); a warning reports how many are missing.
 
 B = stack.B;
 mDoF = 2*size(DoF, 1);
@@ -39,8 +43,18 @@ for j = 1:3
 
     rows = find(DoF(:, 9) == layer(j));
     mask = pdist2(target, DoF(rows, 3:8)) < 1e-9;
-    [~, c] = find(mask);
+    [found, c] = find(mask);
     c = rows(sort(c));
+    missing = size(N, 2)-numel(unique(found));
+    if missing > 0
+        % A wanted site is absent when |G_l| >= L for one of its reciprocal components
+        % (getDoF) or when getDoF(...,'clean') removed it. The tiling of the W-disk then
+        % has holes and the total DoS loses that share of its mass.
+        warning('TTG_DoS:missingStartSites', ...
+            ['Grid %d: %d of %d start sites on layer %d are not in DoF; the moire ' ...
+             'tiling does not cover the W-disk. Increase L (getDoF) or decrease W.'], ...
+            j, missing, size(N, 2), layer(j));
+    end
 
     idx = 2*(c-1)+(1:2);                        % both orbitals of each site
     idx = idx.';
