@@ -1,16 +1,20 @@
-function intraH = getIntralayerOperatorBM(q, stack, DoF)
+function intraH = getIntralayerOperatorBM(q, stack, DoF, vf)
+% GETINTRALAYEROPERATORBM  Rotated Dirac blocks of the continuum model.
+%   q is measured from K_2 in the reflected coordinates of getHamiltonianBM.
+%   vf (eV*Angstrom) defaults to 6.582119569*0.8 for backward compatibility; getHamiltonianBM
+%   now passes the tight-binding value.
+    if nargin < 4 || isempty(vf), vf = 6.582119569*0.8; end
     theta = deg2rad(stack.theta);
     %shiftK = stack.K-stack.K(:, 2);
     m = size(DoF, 1);
     [r, c, v] = deal(zeros(2*m, 1));
     offset = [1 2; 2 1];
     t = 0;
-    vf =  6.582119569*0.8; % eVAs sqrt(3)/2 * 2.46 * 2.99251;
     for i1 = 1:3
         mask = DoF(:, 9) == i1;
         mValid = nnz(mask);
         I = 2*(find(mask)-1);
-        k = q+DoF(mask, 1:2)';%-shiftK(:, i1);
+        k = q+DoF(mask, 1:2)';
 
         kPlus = k(1, :)+1i*k(2, :);
         kMinus = conj(kPlus);
@@ -26,4 +30,4 @@ function intraH = getIntralayerOperatorBM(q, stack, DoF)
         end
     end
     intraH = sparse(r, c, v, 2*m, 2*m);
-end
+end

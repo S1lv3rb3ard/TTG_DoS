@@ -32,7 +32,7 @@ for i1 = 1:size(theta, 1)
 
     DoF = getDoF(stack, W(i1), L(i1), 'clean');
     X{i1} = getMoireBasis(stack, DoF, W(i1));
-    H{i1} = getHamiltonianTB(stack, DoF, 8, 6.25);
+    H{i1} = getHamiltonianTB(stack, DoF, 6.25, 0.25);   % interlayer cutoff = RelaxedTTG smoothCutoff on [6, 6.25] 1/A; all intralayer groups
     H0 = H{i1}(stack.K(:, 2));
     maxBasis = max(cellfun(@(c) size(c, 2), X{i1}));
     m = size(H0, 2);

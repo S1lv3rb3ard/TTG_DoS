@@ -53,15 +53,20 @@ When everything finishes, the cluster produces **`cluster/out/job_full.mat`** �
 `Job` struct with every per-slice moment row. Copy it back and reconstruct the DoS
 locally (`getDoS` is intentionally not run on the cluster):
 ```matlab
-S = load('cluster/out/job_full.mat');   % S.Job.list has columns t, N, X, model, mu
+S = load('cluster/out/job_full.mat');   % S.Job.list has columns t, N, X, ix, model, mu
 E = linspace(-0.2, 0.2, 4e3);           % your energy grid
-Job = getDoS(S.Job, E, "cpu");          % or "gpu"; sums the slices + reconstructs the DoS
+Job = getDoS(S.Job, E, "cpu");          % or "gpu"; one DoS row per (theta, N in Nsweep)
 ```
 
 ## Knobs you might touch
 
-- **Physics parameters** (`theta`, `N`, `P`, step counts): top of the `makeStage`
-  function in `ttg_cluster.m` — these mirror the top of `test.m`.
+- **Physics parameters** (`theta`, `Nmax`, `Nsweep`, `P`, step counts): top of the
+  `makeStage` function in `ttg_cluster.m`. Moments are computed once on the `Nmax` grid;
+  `getDoS` then returns the DoS for every `N` in `Nsweep` (each must divide `Nmax`, since an
+  N-grid is a subset of the Nmax-grid). Only the K valley is computed; K' enters through
+  the doubled weight in `getMoireBZ` (exact time-reversal symmetry of the truncated model).
+- **Smaller P from the same run**: `getDoS(Job, E, mode, Puse)` uses moments 0..Puse, which
+  are exactly the moments of a Puse run, so a P-convergence check needs only the largest P.
 - **Energy grid** for the final DoS: set `E` when you call `getDoS` locally (see "Run it").
 - **Number of slices / concurrency**: `NSLICES` and `MAXCONC` at the top of
   `submit_all.sh`. The 72 h wall limit is **per slice**, not for the whole run — the

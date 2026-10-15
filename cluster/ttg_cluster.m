@@ -39,8 +39,11 @@ function makeStage(outdir)
              -sqrt(3)/2, 0, sqrt(2)/2];
     NumStepW = 4;
     NumStepL = 25;
-    N = 3:3:30;
-    P = 4e3;
+    Nmax = 30;                 % moments are computed on this grid only ...
+    Nsweep = [3 5 6 10 15 30]; % ... and getDoS returns the DoS for every N here (each must
+                               % divide Nmax: the N-grid is a subset of the Nmax-grid).
+                               % Cost = one Nmax run; the old N = 3:3:30 sweep cost 3.85x that.
+    P = 4e3;                   % getDoS(Job,E,mode,Puse) also gives every Puse <= P.
     % ======================================================================
 
     [W1, W2] = ndgrid(0:NumStepW);
@@ -69,24 +72,23 @@ function makeStage(outdir)
 
         DoF = getDoF(stack, W(i1), L(i1), 'clean');
         X{i1} = getMoireBasis(stack, DoF, W(i1));
-        H{i1} = getHamiltonianTB(stack, DoF, 8, 6.25);
+        H{i1} = getHamiltonianTB(stack, DoF, 6.25, 0.25);   % interlayer cutoff = RelaxedTTG smoothCutoff on [6, 6.25] 1/A; all intralayer groups
         H0 = H{i1}(stack.K(:, 2));
         maxBasis = max(cellfun(@(c) size(c, 2), X{i1}));
         m = size(H0, 2);
         cost = 24*nnz(H0)+24*m+3*16*m*maxBasis+8*(P+1);
-        for i2 = 1:numel(N)
-            [Q, weights{i1}(i2, :)] = getMoireBZ(stack, N(i2));
-            weights{i1}(i2, :) = weights{i1}(i2, :)/(6*stack.V^2);
-            for i3 = 1:3
-                numQ = size(Q{i3}, 2);
-                temp = table;
-                temp.t = repmat(i1, numQ, 1);
-                temp.X = repmat(i3, numQ, 1);
-                temp.N = repmat(i2, numQ, 1);
-                temp.Q = Q{i3}.';
-                temp.cost = repmat(cost, numQ, 1);
-                JobList = [JobList; temp];
-            end
+        [Q, weights{i1}(1, :), gridIdx] = getMoireBZ(stack, Nmax);   % K valley; K' via time reversal
+        weights{i1}(1, :) = weights{i1}(1, :)/(6*stack.V^2);
+        for i3 = 1:3
+            numQ = size(Q{i3}, 2);
+            temp = table;
+            temp.t = repmat(i1, numQ, 1);
+            temp.X = repmat(i3, numQ, 1);
+            temp.N = repmat(1, numQ, 1);
+            temp.ix = gridIdx.';
+            temp.Q = Q{i3}.';
+            temp.cost = repmat(cost, numQ, 1);
+            JobList = [JobList; temp];
         end
         scale(i1) = 1./(1.25*norm(H0, inf));
     end
@@ -98,7 +100,9 @@ function makeStage(outdir)
     Job.L = L;
     Job.H = H;
     Job.X = X;
-    Job.N = N;
+    Job.N = Nmax;
+    Job.Nmax = Nmax;
+    Job.Nsweep = Nsweep;
     Job.weights = weights;
     Job.scale = scale;
     Job.P = P;
@@ -162,64 +166,6 @@ function collectStage(outdir)
         fullfile(outdir, 'job_full.mat'), height(Job.list), numel(files));
 end
 
-% ======================================================================
-%  Helpers copied verbatim from test.m (so this file is self-contained)
-% ======================================================================
-function basis = getMoireBasis(stack, DoF, W)
-invB = cellfun(@inv, stack.B, 'uni', false);
-invB = blkdiag(invB{:});
-compI = round(invB*DoF(:, 3:8).');
-P = cat(2, stack.B{:});
-compG = P*compI;
-
-basis = cell(1, 3);
-for j = 1:3
-    if j == 1
-        C = stack.B{1}-stack.B{2};
-    elseif j == 2
-        basis{2} = basis{1};
-        continue;
-    elseif j == 3
-        C = stack.B{2}-stack.B{3};
-    end
-    limitN = floor(W*vecnorm(inv(C), 2, 2));
-    ranN1 = -limitN(1):limitN(1);
-    ranN2 = -limitN(2):limitN(2);
-    [N1, N2] = ndgrid(ranN1, ranN2);
-    N = [N1(:) N2(:)]';
-    G = C*N;
-    validG = G(:, vecnorm(G, 2, 1)<W);
-
-    mask = pdist2(validG.', compG.')<1e-15;
-    [~, c] = find(mask);
-
-    idx = 2*(c-1)+(1:2);
-    idx = idx.';
-    idx = idx(:);
-
-    mBasis = numel(idx);
-    mDoF = 2*size(DoF, 1);
-
-    basis{j} = sparse(idx, 1:mBasis, 1, mDoF, mBasis);
-end
-end
-
-function [MoireBZ, weights] = getMoireBZ(stack, N)
-    ranN = (0:N-1)/N;
-    [X1, X2] = ndgrid(ranN);
-    X = [X1(:) X2(:)].';
-    MoireBZ = cell(1, 3);
-    weights = zeros(1, 3);
-    for j = 1:3
-        if j == 1
-            C = stack.B{1}-stack.B{2};
-        elseif j == 2
-            C = stack.B{1}-stack.B{2};
-        elseif j == 3
-            C = stack.B{2}-stack.B{3};
-        end
-        weights(j) = abs(det(C))/(N^2);
-        MoirePoints = C*X;
-        MoireBZ{j} = [MoirePoints+stack.K(:, j), MoirePoints+stack.pK(:, j)];
-    end
-end
+% getMoireBasis and getMoireBZ used to be copied here as local functions. Local functions
+% shadow the path, so the copies are removed: the versions in Geometry/ (on the path via
+% addpath(genpath(repo)) above) are used, and fixes there now reach the cluster runs.

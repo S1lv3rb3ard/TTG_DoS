@@ -1,9 +1,9 @@
-function interH = getInterlayerOperatorBM(K, DoF)
+function interH = getInterlayerOperatorBM(K, DoF, wAA, wAB)
+% wAA, wAB: AA and AB tunnelling (eV); defaults 0.07 and 0.11.
+if nargin < 3 || isempty(wAA), wAA = 0.07; end
+if nargin < 4 || isempty(wAB), wAB = 0.11; end
 m = size(DoF, 1);
 S = getSparsity(DoF, 'block');
-% Set interlayer coupling strengths
-wAA = 0.07;
-wAB = 0.11;
 % Compute hopping matrices and neighbor vector
 [T, Q] = getTQ(wAA, wAB, K);
 % Compute maximum number of nonzero entries and 
@@ -26,7 +26,7 @@ for i1 = 1:2
     k = DoF(I, 1:2)'-DoF(J, 1:2)';
     % Check if entry gets T(:, i3)
     mask = zeros(3, size(k, 2));
-    tol = 1e-15;
+    tol = 1e-9;    % was 1e-15: exact float comparison of momentum differences
     for i3 = 1:3
         mask(i3, :) = all(abs(k-Q{i1}(:, i3))<=tol, 1);
     end
@@ -52,4 +52,4 @@ c = c(1:t);
 v = v(1:t);
 interH = sparse(r, c, v, 2*m, 2*m);
 interH = interH+interH';
-end
+end
