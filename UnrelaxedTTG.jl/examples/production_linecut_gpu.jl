@@ -3,10 +3,11 @@
 #   using CUDA; include("examples/production_linecut_gpu.jl")
 #   linecut_gpu(; set = 2, P = 2000, Nq = 60, directory = "…")
 #
-# The Hamiltonians Ĥ_q^{(τ,W,L)} are assembled on the CPU threads (`builders` tasks) and
-# passed through a bounded queue to `consumers` GPU tasks, each of which runs the
-# Chebyshev recurrence for the six zero-label orbitals of one momentum as one
-# sparse-times-dense product per step. Finished momenta (mu_<index>.bin) are skipped; a folder
+# The Hamiltonians Ĥ_q^{(τ,W,L)} are assembled on the CPU threads (`builders` tasks), reduced to
+# the rows that the recurrence can reach from the zero labels and stored in sliced ELLPACK form
+# (`SlicedELL`), and passed through a bounded queue to `consumers` GPU tasks, each of which runs
+# the Chebyshev recurrence for the six zero-label orbitals of one momentum with one kernel launch
+# per step. Finished momenta (mu_<index>.bin) are skipped; a folder
 # with moments of other parameters is refused, and the first error of a task stops the run.
 # `precision = ComplexF32` runs the recurrence in single precision; `drop` (eV) removes the
 # matrix entries with |h| ≤ drop before the recurrence (0 keeps the full matrix).
@@ -24,7 +25,9 @@ momentum q of the path:
 
 1. a CPU task builds the window 𝒲*(q, W) ∩ ℒ*(L) and the sparse Ĥ_q^{(τ,W,L)} (τ = 8.5, δ = 6.5 Å⁻¹,
    Jung–MacDonald Table I with the Dirac shift), removes the entries with |h| ≤ `drop`, checks
-   ‖Ĥ_q‖_∞ ≤ B_H and scales by s = (1 − δ_s)/B_H, δ_s = 0.05;
+   ‖Ĥ_q‖_∞ ≤ B_H, scales by s = (1 − δ_s)/B_H, δ_s = 0.05, and stores the block of sĤ_q on the rows
+   connected to the zero-label orbitals as a `SlicedELL` of element type `precision` (the other
+   rows of the window cannot influence the moments, see `reachable`);
 2. a GPU task computes μ_n = ∑_c [T_n(sĤ_q)]_cc, n = 0, …, P − 1, summed over the orbitals c of the
    zero labels present in the window (at most six), and writes them to `mu_<index>.bin`.
 
@@ -96,7 +99,7 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
         length(path.q), B_H, 1e3 * kpm_resolution(s, P), builders, consumers); flush(log)
     start = time()
     todo = Channel{Int}(length(pending) + 1); foreach(i -> put!(todo, i), pending); close(todo)
-    built = Channel{Tuple{Int,SparseMatrixCSC{ComplexF64,Int},Vector{Int},Int}}(queue)
+    built = Channel{Tuple{Int,SlicedELL{precision,Vector{precision},Vector{Int32}},Vector{Int},Int}}(queue)
     done = Threads.Atomic{Int}(0)
     report = ReentrantLock()
     stop = Threads.Atomic{Bool}(false)                     # set by the first task that fails
@@ -125,7 +128,8 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
                 present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
                 H = hamiltonian(model, window)
                 drop > 0 && droptol!(H, drop)                  # entries with |h| ≤ drop (eV) are removed; ‖ΔH‖₂ ≤ largest dropped row sum
-                put!(built, (i, UnrelaxedTTG.scaled(H, s, B_H), present, length(window)))
+                H̃ = SlicedELL(UnrelaxedTTG.scaled(H, s, B_H), precision; reach = present)   # rows reachable from the zero labels
+                put!(built, (i, H̃, present, length(window)))
             end
         end
     end
@@ -134,14 +138,14 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
             for (i, H̃, present, labels) in built
                 stop[] && break
                 t = time()
-                H̃_gpu = gpu_matrix(H̃, precision)
+                H̃_gpu = gpu_matrix(H̃)
                 μ = chebyshev_moments(H̃_gpu, present, P)
                 CUDA.unsafe_free!(H̃_gpu)
                 write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
                 Threads.atomic_add!(done, 1)
                 lock(report) do
-                    @printf(log, "q %4d: %6d labels, %d zero labels, GPU %5.1f s, %7.0f s elapsed\n", i, labels,
-                        length(present) ÷ 2, time() - t, time() - start); flush(log)
+                    @printf(log, "q %4d: %6d labels, %6d rows reached, %d zero labels, GPU %5.2f s, %7.0f s elapsed\n", i, labels,
+                        size(H̃, 1), length(present) ÷ 2, time() - t, time() - start); flush(log)
                 end
             end
         end

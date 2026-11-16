@@ -34,7 +34,8 @@ recurrence of Section 4.5 runs on the device; the windows and the assembly stay 
     s      = (1 - 0.05) / B_H                             # KPM scale s = (1 − δ_s)/B_H
     H̃      = UnrelaxedTTG.scaled(H, s, B_H)               # sĤ, after the check ‖Ĥ‖_∞ ≤ B_H
     c      = [o for t in 1:3 for o in orbitals(zero_label(window, t))]   # the six zero-label orbitals
-    μ      = chebyshev_moments(gpu_matrix(H̃, ComplexF32), c, 2000)       # or gpu_matrix(H̃) for double precision
+    S      = SlicedELL(H̃, ComplexF32; reach = c)          # the rows reachable from c, in GPU storage (or ComplexF64)
+    μ      = chebyshev_moments(gpu_matrix(S), c, 2000)
     F      = kpm_density(μ, s, range(-0.2, 0.2; length = 401)) ./ 6      # momentum LDoS (4.36)
 
 (here every zero label is in the window; in general keep only those with `zero_label(window, t) > 0`,
@@ -62,6 +63,7 @@ include("window.jl")          # labels, W- and L-truncation, connectedness searc
 include("hamiltonian.jl")     # Model and the assembly of Ĥ_q^{(τ,W,L)}
 include("reference.jl")       # slow reference implementations for tests
 include("kpm.jl")             # Jackson-kernel Chebyshev moments and densities
+include("sell.jl")            # reachable rows and sliced ELLPACK storage for the GPU recurrence
 include("parameters.jl")     # angle triples of Section 5, output folders of the drivers
 include("dos.jl")             # momentum LDoS, Brillouin-zone and moiré-cell DoS
 include("posteriori.jl")      # a posteriori bound of the W-truncation (Lemma 4.4)
@@ -76,6 +78,7 @@ export Model, hamiltonian, interlayer_entry, neighbours, interlayer_row_sum, spe
 export ANGLE_SETS, triple_parameters, claim_directory
 export reference_hamiltonian, reference_fourier_hopping, reference_bloch, gaussian_density, reference_moments
 export jackson, kpm_density, kpm_density!, chebyshev_moments, kpm_resolution, gpu_matrix
+export SlicedELL, reachable
 export Linecut, linecut, momentum_ldos, moire_cell, moire_dos, brillouin_dos
 export Boundary, boundary, transfer_norm, flux_bound, escape_norm, posteriori_bound, bracket_bound
 

@@ -137,14 +137,27 @@ function scaled(H::SparseMatrixCSC, s::Real, B_H::Real)
 end
 
 """
+    gpu_matrix(S::SlicedELL) -> S on the GPU
     gpu_matrix(H̃) -> H̃ on the GPU
     gpu_matrix(H̃, T) -> H̃ on the GPU with element type T
 
-Copy of the scaled Hermitian sparse matrix H̃ = sĤ_q^{(τ,W,L)} in compressed-row storage on the
-GPU (`CuSparseMatrixCSR`). [`chebyshev_moments`](@ref) applied to the result runs the recurrence
-of Section 4.5 on the GPU with the same doubling relations as on the CPU.
+Copy of the scaled Hermitian sparse matrix H̃ = sĤ_q^{(τ,W,L)} on the GPU.
+[`chebyshev_moments`](@ref) applied to the result runs the recurrence of Section 4.5 on the GPU
+with the same doubling relations as on the CPU.
 
-The one-argument method keeps the element type of H̃ (`ComplexF64` for the matrices of
+The first method uploads the sliced ELLPACK storage [`SlicedELL`](@ref) of H̃ (element type and
+stored rows as chosen there); the recurrence then uses the kernel of the extension. This is the
+fast path, used by the drivers:
+
+    S = SlicedELL(H̃, ComplexF32; reach = c)              # on the CPU; c = start orbitals
+    μ = chebyshev_moments(gpu_matrix(S), c, P)
+
+The other two methods upload H̃ in compressed-row storage (`CuSparseMatrixCSR`); the recurrence
+then uses the CUSPARSE product. It is slower (measured 2.5 to 3 times at the settings of the line
+cuts) and its single-precision results vary from run to run in the last digits; it is kept as an
+independent implementation for the tests.
+
+The one-argument method for a `SparseMatrixCSC` keeps the element type of H̃ (`ComplexF64` for the matrices of
 [`hamiltonian`](@ref)). The two-argument method converts the entries to `T` and the indices to
 `Int32` first; `T = ComplexF32` runs the recurrence in single precision. The moments are returned
 as `Float64` in both cases, but with `ComplexF32` every product and inner product is accumulated in

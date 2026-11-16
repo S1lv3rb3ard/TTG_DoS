@@ -457,6 +457,57 @@ end
     end
 end
 
+@testset "reachable rows and sliced ELLPACK storage (src/sell.jl)" begin
+    # two blocks that are not coupled and three empty rows, in a random order of the rows
+    A = sprand(ComplexF64, 70, 70, 0.08)
+    B = sprand(ComplexF64, 45, 45, 0.10)
+    M = blockdiag(A + A', B + B', spzeros(ComplexF64, 3, 3))
+    shuffle = randperm(118)
+    M = M[shuffle, shuffle]
+    M̃ = M / (1.1 * maximum(sum(abs, M; dims = 2)))               # spectrum in (−1, 1)
+    start = [findfirst(==(1), shuffle), findfirst(==(2), shuffle)]  # two rows of the first block
+    # reachable: the support of (|M| + I)ⁿ e_c
+    x = zeros(118); x[start] .= 1
+    for _ in 1:118
+        x = (abs.(M) + I) * x
+        x ./= maximum(x)
+    end
+    R = reachable(M, start)
+    @test R == (x .> 0)
+    @test 2 ≤ count(R) ≤ 70
+    @test_throws ArgumentError reachable(M, [0])
+    @test_throws ArgumentError reachable(M, [119])
+    # the moments are those of the block on the reachable rows
+    rows = findall(R)
+    inside = [findfirst(==(c), rows) for c in start]
+    @test chebyshev_moments(M̃[rows, rows], inside, 60) ≈ chebyshev_moments(M̃, start, 60) atol = 1e-13
+    # storage: a symmetric permutation of the block, padded with zeros
+    for (S, expected) in ((SlicedELL(M̃; reach = start), rows), (SlicedELL(M̃), collect(1:118)), (SlicedELL(M̃; reach = start, sort_window = 5), rows))
+        n = size(S, 1)
+        @test sort(S.rows) == expected
+        @test S.position[S.rows] == 1:n
+        @test count(>(0), S.position) == n
+        @test SparseMatrixCSC(S) == M̃[S.rows, S.rows]
+        @test S.offset[end] == length(S.val) == length(S.col) == U.SLICE * sum(S.width)
+        @test all(i -> 1 ≤ i ≤ n, S.col)
+        @test count(!iszero, S.val) == nnz(M̃[S.rows, S.rows])
+        @test chebyshev_moments(S, start, 61) ≈ chebyshev_moments(M̃, start, 61) atol = 1e-13
+    end
+    @test SlicedELL(M̃; reach = start, sort_window = 1).rows == rows                      # no sorting: the order of the matrix
+    lengths = [nnz(M̃[i, :]) for i in SlicedELL(M̃; sort_window = 118).rows]
+    @test issorted(lengths; rev = true)                                                   # one window: longest rows first
+    S = SlicedELL(M̃, ComplexF32; reach = start)
+    @test eltype(S) == ComplexF32 && S.val isa Vector{ComplexF32}
+    @test SparseMatrixCSC(S) == ComplexF32.(M̃[S.rows, S.rows])
+    @test_throws ArgumentError chebyshev_moments(S, [findfirst(==(71), shuffle)], 4)      # a row of the other block
+    # the Hamiltonian of a window
+    window = Window(stack, stack.K[2] + SVector(0.01, 0.02), 0.25, 6.0)
+    B_H, _ = spectral_bound(model, 0.25)
+    H̃ = U.scaled(hamiltonian(model, window), 0.95 / B_H, B_H)
+    c = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+    @test chebyshev_moments(SlicedELL(H̃; reach = c), c, 80) ≈ chebyshev_moments(H̃, c, 80) atol = 1e-12
+end
+
 @testset "GPU recurrence (extension UnrelaxedTTGCUDAExt)" begin
     if HAS_CUDA && CUDA.functional()
         q = stack.K[2] + SVector(0.01, 0.02)
@@ -478,6 +529,20 @@ end
             @test chebyshev_moments(gpu_matrix(H̃, ComplexF32), start, P) ≈ μ atol = 1e-4
         end
         @test chebyshev_moments(gpu_matrix(H̃), Int[], 5) == zeros(5)
+        # the kernel on the sliced ELLPACK storage, with all rows and with the reachable rows only
+        for T in (ComplexF64, ComplexF32), reach in (nothing, start)
+            G = gpu_matrix(SlicedELL(H̃, T; reach))
+            tolerance = T == ComplexF64 ? 1e-11 : 1e-4
+            for P in (1, 2, 3, 4, 7, 200, 201)
+                @test chebyshev_moments(G, start, P) ≈ chebyshev_moments(H̃, start, P) atol = tolerance
+            end
+            @test chebyshev_moments(G, start, 201) == chebyshev_moments(G, start, 201)   # the sums have a fixed order
+            @test chebyshev_moments(G, start[3:4], 50) ≈ chebyshev_moments(H̃, start[3:4], 50) atol = tolerance
+            @test chebyshev_moments(G, Int[], 5) == zeros(5)
+            CUDA.unsafe_free!(G)
+        end
+        D = blockdiag(sparse(ComplexF64[0.1 0.2; 0.2 0.1]), sparse(ComplexF64[0.3;;]))
+        @test_throws ArgumentError chebyshev_moments(gpu_matrix(SlicedELL(D; reach = [1])), [3], 4)   # row 3 is not stored
     else
         @info "GPU test set skipped: CUDA.jl is not in the environment, or no device is usable"
     end

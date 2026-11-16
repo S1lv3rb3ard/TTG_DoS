@@ -25,7 +25,7 @@ G = (G_s)_{s≠t} with G_s = B_s m_s, m_s ∈ ℤ². A label has the momentum k_
 | Interlayer entry (3.5), (4.4) | c_j c_k g_τ(p) e^{i(G′_j·τ_{jα} − G_k·τ_{kβ})} ĥ_{kβ}^{jα}(p), p = k_x + G′_j | `neighbours`, `interlayer_entry`, `fourier_hopping` |
 | Truncated Hamiltonian | Ĥ_q^{(τ,W,L)}, sparse and exactly Hermitian | `hamiltonian(model, window)` |
 | Bound (4.35) | B_H ≥ ‖Ĥ_q^{(τ,W,L)}‖₂ | `spectral_bound(model)`, `spectral_bound(model, W)` |
-| Chebyshev moments | μ_n = ∑_c [T_n(sĤ_q)]_cc, s = (1 − δ_s)/B_H | `chebyshev_moments` (CPU and GPU) |
+| Chebyshev moments | μ_n = ∑_c [T_n(sĤ_q)]_cc, s = (1 − δ_s)/B_H | `chebyshev_moments` (CPU and GPU), `SlicedELL`, `reachable` |
 | KPM density (4.33), (4.34) | s/(π√(1 − (sE)²)) ∑_n g_n^P μ_n T_n(sE) | `kpm_density`, `jackson` |
 | Momentum LDoS (4.36) | (1/6) ∑_{jα} [δ^P_KPM(E, Ĥ_q)]_{(0,jα),(0,jα)} | `momentum_ldos`, `examples/production_linecut_gpu.jl` |
 | Density of states (4.39), (4.1) | moiré-cell rule, Brillouin-zone rule | `moire_dos`, `brillouin_dos` |
@@ -46,12 +46,13 @@ src/window.jl           Label, Window (direct enumeration), search_window (Theor
 src/hamiltonian.jl      Model, hamiltonian, spectral_bound
 src/parameters.jl       ANGLE_SETS, triple_parameters (angle triples with their W and L), claim_directory
 src/kpm.jl              jackson, kpm_density, chebyshev_moments (CPU), gpu_matrix (stub)
+src/sell.jl             reachable (rows the recurrence can reach), SlicedELL (storage for the GPU recurrence)
 src/dos.jl              Linecut, momentum_ldos, moire_dos, brillouin_dos
 src/posteriori.jl       a posteriori diagnostics of the truncation
 src/reference.jl        slow reference implementations used by the tests
-ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on CuSparseMatrixCSR (loaded with CUDA.jl)
+ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on the GPU: kernel on SlicedELL, and CUSPARSE (loaded with CUDA.jl)
 examples/               drivers, see below
-test/runtests.jl        6656 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
+test/runtests.jl        6732 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
 ```
 
 ## Installation
@@ -106,9 +107,28 @@ linecut_gpu(; set = 2, W = 0.25, L = 45.84, P = 4000, Nq = 60, directory = "line
 
 The Hamiltonians are assembled on the CPU threads and passed through a bounded queue to the GPU
 tasks, which run the recurrence t_{m+1} = 2sĤ t_m − t_{m−1} for the six zero-label orbitals of
-one momentum as one sparse-times-dense product per step. Two moments are obtained per product
-(μ_{2m} = 2⟨t_m, t_m⟩ − μ₀, μ_{2m+1} = 2⟨t_{m+1}, t_m⟩ − μ₁). See the docstring of `linecut_gpu`
-for all keyword arguments.
+one momentum. Two moments are obtained per product (μ_{2m} = 2⟨t_m, t_m⟩ − μ₀,
+μ_{2m+1} = 2⟨t_{m+1}, t_m⟩ − μ₁). See the docstring of `linecut_gpu` for all keyword arguments.
+
+Two things make the GPU step fast (version 0.4.0):
+
+- Only the rows that the recurrence can reach from the zero labels are kept (`reachable`): H̃ maps
+  the span of these rows into itself, so the moments are those of the block on them. In the
+  production windows about a third of the rows is not connected to the zero labels by Ĥ_q^{(τ,W,L)}.
+- The block is stored in sliced ELLPACK form (`SlicedELL`), in which the 32 threads of a GPU warp
+  read neighbouring memory, and one kernel launch per step computes the product, the update and
+  both inner products. The inner products stay on the GPU until the end of the recurrence, and
+  their sums have a fixed order, so a run reproduces its moments bit for bit.
+
+By hand:
+
+```julia
+S = SlicedELL(H̃, ComplexF32; reach = c)              # on the CPU; c = start orbitals (rows of H̃)
+μ = chebyshev_moments(gpu_matrix(S), c, P)             # on the GPU
+```
+
+`gpu_matrix(H̃, ComplexF32)` uploads compressed-row storage instead and uses the CUSPARSE product;
+this is the path of versions 0.2.0 and 0.3.0, kept as an independent implementation for the tests.
 
 Output, one folder per run:
 
@@ -158,22 +178,32 @@ decimals changes the LDoS by several 10⁻⁶ on its own. To resume a run, pass 
 ### Measured timings and accuracy
 
 RTX 3080 and i5-13600KF (20 threads), θ = (−√3/2°, 0°, √2/2°), L = 45.84, P = 4000
-(ε_P = 3.4 meV), per momentum, 15 November 2026:
+(ε_P = 3.4 meV), GPU time of the recurrence per momentum; CUSPARSE path on 15 and 16 November
+2026, `SlicedELL` on 16 November 2026:
 
-| W | labels | arithmetic | GPU time |
-|---|---|---|---|
-| 0.3771 | 336 000 | `ComplexF64`, full matrix | 30 s |
-| 0.3771 | 336 000 | `ComplexF32`, full matrix | 5.6 s |
-| 0.3771 | 336 000 | `ComplexF32`, `drop = 1e-5` | 3.0 s |
-| 0.25 | 156 000 | `ComplexF32`, `drop = 1e-5` | 1.3 s |
+| W | labels | arithmetic | CUSPARSE (0.2.0, 0.3.0) | `SlicedELL` (0.4.0) |
+|---|---|---|---|---|
+| 0.3771 | 336 000 | `ComplexF64`, full matrix | 30 s | 9.8 s |
+| 0.3771 | 336 000 | `ComplexF32`, full matrix | 5.6 s | 1.9 s |
+| 0.3771 | 336 000 | `ComplexF32`, `drop = 1e-5` | 3.0 s | 1.2 s |
+| 0.25 | 156 000 | `ComplexF64`, full matrix | 12.7 s | 4.4 s |
+| 0.25 | 156 000 | `ComplexF32`, full matrix | 2.0 s | 0.75 s |
+| 0.25 | 156 000 | `ComplexF32`, `drop = 1e-5` | 1.4 s | 0.48 s |
+
+The line cut of 301 momenta at W = 0.25 with `ComplexF32` and `drop = 1e-5` takes 146 s with
+version 0.4.0 (417 s with version 0.2.0); its moments differ from those of the earlier run by at
+most 3.0 × 10⁻⁶ and the LDoS by at most 5.0 × 10⁻⁷ in the measure (5.2). Building the storage on
+the CPU takes 0.05–0.8 s per matrix (in the assembly tasks).
 
 Relative LDoS differences (5.2) on [−0.2, 0.2] eV to double precision with the full matrix:
 2.5 × 10⁻⁷ for `ComplexF32`, 2.3–2.6 × 10⁻⁵ with `drop = 1e-5` (the threshold sets the difference).
 Assembly of one matrix with 156 000 labels takes 1.6 s on one core (version 0.3.0; 2.3–2.4 s for the
 same matrix with version 0.2.0, 16 November 2026).
 
-In `ComplexF32` the GPU moments of the same matrix differ between two runs by about 10⁻⁶ (measured:
-1.4 × 10⁻⁶ at P = 4000), so a recomputed momentum does not reproduce the bits of an earlier file.
+With `SlicedELL` a recomputed momentum reproduces the bits of the earlier file. With the CUSPARSE
+path in `ComplexF32` the moments of the same matrix differ between two runs by about 10⁻⁶ (measured:
+1.4 × 10⁻⁶ at P = 4000), because the default CUSPARSE product does not fix the order of its sums;
+files written by versions 0.2.0 and 0.3.0 are therefore reproduced to about 10⁻⁶ only.
 
 On 16 November 2026 the GPU moments were compared with the CPU ones on a window of 11 403 labels
 for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1.6 × 10⁻⁶ in `ComplexF32`.

@@ -41,12 +41,14 @@ end
     gpu_ldos(H, present, s, B_H, P; precision, drop, E) -> (F, seconds, μ)
 
 F(E) = (1/6) ∑ over the zero-label orbitals of [δ^P_KPM(E, H)]_cc on the energies E, from moments
-computed on the GPU at the scale s after removing the entries with |h| ≤ drop (eV).
+computed on the GPU at the scale s after removing the entries with |h| ≤ drop (eV). `seconds` is
+the time of the upload and the recurrence.
 """
 function gpu_ldos(H, present, s, B_H, P; precision = ComplexF32, drop = 1e-5, E)
     drop > 0 && (H = droptol!(copy(H), drop))
+    S = SlicedELL(UnrelaxedTTG.scaled(H, s, B_H), precision; reach = present)   # rows reachable from the zero labels
     t = time()
-    H̃ = gpu_matrix(UnrelaxedTTG.scaled(H, s, B_H), precision)
+    H̃ = gpu_matrix(S)
     μ = chebyshev_moments(H̃, present, P)
     CUDA.unsafe_free!(H̃)
     seconds = time() - t
