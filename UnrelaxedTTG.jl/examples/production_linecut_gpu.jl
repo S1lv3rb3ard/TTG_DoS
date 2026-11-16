@@ -1,0 +1,165 @@
+# Production line cut on a GPU, with checkpoints. Same files as `production_linecut.jl`.
+#
+#   using CUDA; include("examples/production_linecut_gpu.jl")
+#   linecut_gpu(; set = 2, P = 2000, Nq = 60, directory = "…")
+#
+# The Hamiltonians Ĥ_q^{(τ,W,L)} are assembled on the CPU threads (`builders` tasks) and
+# passed through a bounded queue to `consumers` GPU tasks, each of which runs the
+# Chebyshev recurrence for the six zero-label orbitals of one momentum as one
+# sparse-times-dense product per step. Finished momenta (mu_<index>.bin) are skipped.
+# `precision = ComplexF32` runs the recurrence in single precision; `drop` (eV) removes the
+# matrix entries with |h| ≤ drop before the recurrence (0 keeps the full matrix).
+# `B_H` (eV) overrides the bound spectral_bound(model, W), e.g. to keep the KPM scale of the W-sweep of
+# `choose_W.jl`. `cpu_workers` further tasks compute whole momenta on the CPU (same precision and matrix).
+
+using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
+
+"""
+    triple_parameters(set) -> (θ, W, L)
+
+θ (degrees), default W = (W₁ + W*)/2 and default L (rule (5.5)) of the angle triples (Section 5).
+`set = 4` was added on 16 November 2026; its W₁ = 0.3102 was computed with the formula of Section 5.
+
+| set | θ (degrees)        | W (Å⁻¹) | L (Å⁻¹) |
+|-----|--------------------|---------|---------|
+| 1   | (−1.4, 0, 2.8)     | 0.4742  | 19.40   |
+| 2   | (−√3/2, 0, √2/2)   | 0.3771  | 30.56   |
+| 3   | (−1.39, 0, 2.4)    | 0.4596  | 18.95   |
+| 4   | (−1.39, 0, 2.8)    | 0.4744  | 19.555  |
+
+Sets 1 and 2 are the triples of the manuscript with its values of W and L. Sets 3 and 4 follow
+(5.3)–(5.5) evaluated with this package (a = 1.42√3 Å); the same evaluation gives 0.4748, 19.43
+for set 1 and 0.3777, 30.60 for set 2, which differ from the manuscript's values in the fourth digit.
+"""
+function triple_parameters(set::Int)
+    set == 1 && return ((-1.4, 0.0, 2.8), 0.4742, 19.40)
+    set == 2 && return ((-√3 / 2, 0.0, √2 / 2), 0.3771, 30.56)
+    set == 3 && return ((-1.39, 0.0, 2.4), 0.4596, 18.95)
+    set == 4 && return ((-1.39, 0.0, 2.8), 0.4744, 19.555)
+    throw(ArgumentError("set must be 1, 2, 3 or 4"))
+end
+
+"""
+    linecut_gpu(; set, P, Nq, directory, W, L, B_H, precision, drop, consumers, builders, queue, budget, log, cpu_workers) -> done
+
+The Chebyshev moments of the momentum LDoS (4.36) along the path K₁–K₂–Γ₁₂–Γ₂₃–K₂–K₃
+(`linecut(stack, Nq)`, 5`Nq` + 1 momenta), with the recurrence of Section 4.5 on the GPU. For every
+momentum q of the path:
+
+1. a CPU task builds the window 𝒲*(q, W) ∩ ℒ*(L) and the sparse Ĥ_q^{(τ,W,L)} (τ = 8.5, δ = 6.5 Å⁻¹,
+   Jung–MacDonald Table I with the Dirac shift), removes the entries with |h| ≤ `drop`, checks
+   ‖Ĥ_q‖_∞ ≤ B_H and scales by s = (1 − δ_s)/B_H, δ_s = 0.05;
+2. a GPU task computes μ_n = ∑_c [T_n(sĤ_q)]_cc, n = 0, …, P − 1, summed over the orbitals c of the
+   zero labels present in the window (at most six), and writes them to `mu_<index>.bin`.
+
+The LDoS is recovered afterwards as `kpm_density(μ, s, E) ./ 6` with the `s` of `meta.txt`
+(the division by six, not by the number of orbitals present, is the convention (4.10)).
+
+Keyword arguments:
+
+- `set`: the angle triple, see [`triple_parameters`](@ref).
+- `P`: number of Chebyshev moments; the resolution is ε_P = π/(sP).
+- `Nq`: steps per segment of the path.
+- `directory`: output folder (created if needed).
+- `W`, `L`: window radius (Å⁻¹) and scattering radius (Å⁻¹); default: the values of `triple_parameters(set)`.
+- `B_H` (eV): bound used for the scale; default `spectral_bound(model, W)[1]`. Pass the B_H of a
+  reference W (at full precision, from its `meta.txt`) to compare runs at the same s and ε_P.
+- `precision`: element type of the recurrence, `ComplexF64` (default) or `ComplexF32`.
+- `drop` (eV): entries with |h| ≤ `drop` are removed before the recurrence (0 keeps the full matrix).
+  The change of Ĥ_q is bounded in norm by the largest removed row sum; it is not estimated here.
+- `consumers`: number of GPU tasks (default 2); `builders`: number of CPU assembly tasks
+  (default: the number of Julia threads − `consumers` − 1, at least 1); `queue`: assembled matrices held between them.
+- `cpu_workers`: further tasks that compute whole momenta on the CPU (default 0; measured on
+  15 November 2026 to slow the run down, keep 0).
+- `budget` (s): no new momentum is started after this time (default: no limit).
+- `log`: stream for the progress lines (one per momentum).
+
+Files in `directory`:
+
+- `meta.txt`: one `key value…` line each for theta, W, L, P, Nq, B_H, J (= 𝔍), delta_s, s, precision,
+  drop_eV, tau, delta, the intralayer table with E_D, ticks and arclength (the arc lengths of the
+  vertices and of all momenta, Å⁻¹).
+- `mu_<index>.bin`: the `P` moments of momentum number `index` (1-based, four digits) as raw
+  `Float64` in the byte order of the machine. Read with `read!(name, Vector{Float64}(undef, P))`.
+
+Momenta whose file exists are skipped, so an interrupted run continues where it stopped. The
+existing files are not checked against the arguments, and `meta.txt` is rewritten at every call:
+use one folder per parameter set. Returns the number of momenta computed in this call.
+
+The Julia session must have several threads (`julia -t auto`); `using CUDA` must come before
+`include` of this file.
+"""
+function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing, L = nothing, B_H = nothing,
+                     consumers::Int = 2, builders::Int = max(1, Threads.nthreads() - consumers - 1),
+                     queue::Int = 6, budget::Real = Inf, log::IO = stdout, precision::Type = ComplexF64, drop::Real = 0.0, cpu_workers::Int = 0)
+    θ, W₀, L₀ = triple_parameters(set)
+    W = something(W, W₀); L = something(L, L₀)
+    stack = Stack(1.42 * √3, θ)
+    model = Model(stack; τ = 8.5, δ = 6.5)
+    path = linecut(stack, Nq)
+    δ_s = 0.05
+    B_W, 𝔍 = spectral_bound(model, W)
+    B_H = something(B_H, B_W)                          # a larger B_H (e.g. that of the reference W of choose_W) is allowed
+    s = (1 - δ_s) / B_H
+    mkpath(directory)
+    open(joinpath(directory, "meta.txt"), "w") do io
+        println(io, "theta ", join(θ, " ")); println(io, "W ", W); println(io, "L ", L); println(io, "P ", P)
+        println(io, "Nq ", Nq); println(io, "B_H ", B_H); println(io, "J ", 𝔍); println(io, "delta_s ", δ_s); println(io, "s ", s)
+        println(io, "precision ", precision); println(io, "drop_eV ", drop); println(io, "tau 8.5"); println(io, "delta 6.5"); println(io, "table I, Dirac shift E_D ", model.E_D)
+        println(io, "ticks ", join(path.ticks, " ")); println(io, "arclength ", join(path.s, " "))
+    end
+    file(i) = joinpath(directory, @sprintf("mu_%04d.bin", i))
+    pending = [i for i in eachindex(path.q) if !isfile(file(i))]
+    @printf(log, "%d of %d momenta to do; B_H = %.4f eV, ε_P = %.3f meV, %d builders, %d GPU tasks\n", length(pending),
+        length(path.q), B_H, 1e3 * kpm_resolution(s, P), builders, consumers); flush(log)
+    start = time()
+    todo = Channel{Int}(length(pending) + 1); foreach(i -> put!(todo, i), pending); close(todo)
+    built = Channel{Tuple{Int,SparseMatrixCSC{ComplexF64,Int},Vector{Int},Int}}(queue)
+    done = Threads.Atomic{Int}(0)
+    report = ReentrantLock()
+    build = map(1:builders) do _
+        Threads.@spawn for i in todo
+            time() - start < budget || continue
+            window = Window(stack, path.q[i], W, L)
+            present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+            H = hamiltonian(model, window)
+            drop > 0 && droptol!(H, drop)                  # entries with |h| ≤ drop (eV) are removed; ‖ΔH‖₂ ≤ largest dropped row sum
+            put!(built, (i, UnrelaxedTTG.scaled(H, s, B_H), present, length(window)))
+        end
+    end
+    consume = map(1:consumers) do _
+        Threads.@spawn for (i, H̃, present, labels) in built
+            t = time()
+            H̃_gpu = gpu_matrix(H̃, precision)
+            μ = chebyshev_moments(H̃_gpu, present, P)
+            CUDA.unsafe_free!(H̃_gpu)
+            write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
+            Threads.atomic_add!(done, 1)
+            lock(report) do
+                @printf(log, "q %4d: %6d labels, %d zero labels, GPU %5.1f s, %7.0f s elapsed\n", i, labels,
+                    length(present) ÷ 2, time() - t, time() - start); flush(log)
+            end
+        end
+    end
+    cpu = map(1:cpu_workers) do _                          # idle CPU threads take momenta from the same list
+        Threads.@spawn for i in todo
+            time() - start < budget || continue
+            t = time()
+            window = Window(stack, path.q[i], W, L)
+            present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+            H = hamiltonian(model, window)
+            drop > 0 && droptol!(H, drop)
+            H̃ = SparseMatrixCSC{precision,Int}(UnrelaxedTTG.scaled(H, s, B_H))
+            μ = chebyshev_moments(H̃, present, P)
+            write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
+            Threads.atomic_add!(done, 1)
+            lock(report) do
+                @printf(log, "q %4d: %6d labels, %d zero labels, CPU %5.1f s, %7.0f s elapsed\n", i, length(window),
+                    length(present) ÷ 2, time() - t, time() - start); flush(log)
+            end
+        end
+    end
+    foreach(wait, build); close(built); foreach(wait, consume); foreach(wait, cpu)
+    @printf(log, "finished %d momenta in %.0f s; %d remain\n", done[], time() - start, length(pending) - done[]); flush(log)
+    return done[]
+end
