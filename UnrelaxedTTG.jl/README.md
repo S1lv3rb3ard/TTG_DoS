@@ -26,7 +26,8 @@ G = (G_s)_{s≠t} with G_s = B_s m_s, m_s ∈ ℤ². A label has the momentum k_
 | Truncated Hamiltonian | Ĥ_q^{(τ,W,L)}, sparse and exactly Hermitian | `hamiltonian(model, window)` |
 | Bound (4.35) | B_H ≥ ‖Ĥ_q^{(τ,W,L)}‖₂ | `spectral_bound(model)`, `spectral_bound(model, W)` |
 | Chebyshev moments | μ_n = ∑_c [T_n(sĤ_q)]_cc, s = (1 − δ_s)/B_H | `chebyshev_moments` (CPU and GPU), `SlicedELL`, `reachable` |
-| KPM density (4.33), (4.34) | s/(π√(1 − (sE)²)) ∑_n g_n^P μ_n T_n(sE) | `kpm_density`, `jackson` |
+| KPM density (4.33), (4.34) | s/(π√(1 − (sE)²)) ∑_n g_n^P μ_n T_n(sE) | `kpm_density`, `jackson` (kernel `Jackson()`, the default) |
+| Delta-Chebyshev density (arXiv:2512.03149, (15)–(18)) | ∑_n ν_n(E) μ_n, the series of the rational kernel K_η of order m | `kpm_density(…; kernel = DeltaChebyshev(η, m))`, `truncation_bound` |
 | Momentum LDoS (4.36) | (1/6) ∑_{jα} [δ^P_KPM(E, Ĥ_q)]_{(0,jα),(0,jα)} | `momentum_ldos`, `examples/production_linecut_gpu.jl` |
 | Density of states (4.39), (4.1) | moiré-cell rule, Brillouin-zone rule | `moire_dos`, `brillouin_dos` |
 | A posteriori diagnostics | Lemma 4.4, Remark 4.5, Lemma C.4 | `flux_bound`, `transfer_norm` (dense, small windows) |
@@ -45,14 +46,14 @@ src/interlayer.jl       hopping (F.5), Hankel table and Fourier transform (F.8)
 src/window.jl           Label, Window (direct enumeration), search_window (Theorem 4.3(b))
 src/hamiltonian.jl      Model, hamiltonian, spectral_bound
 src/parameters.jl       ANGLE_SETS, triple_parameters (angle triples with their W and L), claim_directory
-src/kpm.jl              jackson, kpm_density, chebyshev_moments (CPU), gpu_matrix (stub)
+src/kpm.jl              kernels Jackson and DeltaChebyshev, kpm_density, truncation_bound, chebyshev_moments (CPU), gpu_matrix (stub)
 src/sell.jl             reachable (rows the recurrence can reach), SlicedELL (storage for the GPU recurrence)
 src/dos.jl              Linecut, momentum_ldos, moire_dos, brillouin_dos
 src/posteriori.jl       a posteriori diagnostics of the truncation
 src/reference.jl        slow reference implementations used by the tests
 ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on the GPU: kernel on SlicedELL, and CUSPARSE (loaded with CUDA.jl)
 examples/               drivers, see below
-test/runtests.jl        6732 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
+test/runtests.jl        6891 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
 ```
 
 ## Installation
@@ -94,6 +95,65 @@ result.ldos                                        # momenta × energies, 1/eV
 ```
 
 Start Julia with several threads (`julia -t auto`); the momenta are distributed over them.
+
+## Choice of the kernel: Jackson or delta-Chebyshev
+
+The Chebyshev moments μ_n do not depend on how the density is regularised. `kpm_density`,
+`momentum_ldos`, `moire_dos` and `brillouin_dos` take the keyword `kernel`:
+
+- `kernel = Jackson()` (default): the kernel polynomial method of the manuscript, (4.33)–(4.36).
+  Positive; the resolution ε_P = π/(sP) is set by the number of moments.
+- `kernel = DeltaChebyshev(η, m)`: the high-order regularized delta-Chebyshev method of Yi, Massatt,
+  Horning, Luskin, Pixley and Kaye (arXiv:2512.03149). The δ-function is replaced by the rational
+  kernel K_η(E, x) = −(1/π) ∑_l Im[w_l/(E − x + η z_l)] of order m with the equispaced poles
+  z_l = 2l/(m + 1) − 1 + i of Colbrook, Horning and Townsend (SIAM Rev. 63 (2021) 489), and K_η is
+  expanded in Chebyshev polynomials; the coefficients are used in closed form (docstring of
+  `kpm_density`). η (eV) is the smoothing parameter. At a point where the density is m times
+  continuously differentiable the error of the regularisation is O(η^m log(1/η)) (Theorem 1 of the
+  reference), against O(P⁻²) for Jackson. For m ≥ 3 the kernel has negative lobes (−4.9 % of its
+  peak for m = 6), so the density can be negative next to a sharp peak.
+
+```julia
+μ = result.μ[1, :]                                   # or read from mu_0001.bin
+K = DeltaChebyshev(0.016, 6)                         # η = 16 meV, order 6
+F = kpm_density(μ, result.s, E; kernel = K) ./ 6
+b = truncation_bound(K, result.s, E, length(μ))      # bound for the terms n ≥ P left out, per unit μ₀ (1/eV)
+result = momentum_ldos(model, path, E; W, L, P, B_H, kernel = K)     # the same in one call
+```
+
+The series of K_η needs P of the order of 1/(sη) terms: the terms decay like exp(−n sη/√(1 − (sE)²)).
+`truncation_bound` is a bound for the terms left out that holds for every set of moments
+(|μ_n| ≤ μ₀); the difference to the density from fewer moments (`view(μ, 1:P′)`) measures them.
+Widths: the full width at half maximum is 2.38 ε_P for the Jackson kernel and 0.66 η for m = 6
+(2η, 1.46η, 1.13η, 0.92η, 0.77η for m = 1, …, 5), so Jackson with P moments and order 6 with
+η = 11.2/(sP) have the same width.
+
+Measured on 16 November 2026 from stored moments (set 2, L = 45.84, m = 6, energies in [−0.2, 0.2] eV,
+s = 0.2321 eV⁻¹; `truncation_bound` and the largest difference of the LDoS between P = 4000 and all
+8000 moments, 25 momenta, W = 0.3771, double precision):
+
+| η | η sP at P = 4000 | `truncation_bound`, P = 4000 | measured, P = 4000 against 8000 |
+|---|---|---|---|
+| 8 meV | 7.4 | 12 eV⁻¹ | 8.4 × 10⁻² eV⁻¹ (1.9 × 10⁻² of the largest LDoS value) |
+| 12 meV | 11.1 | 0.19 eV⁻¹ | 1.3 × 10⁻³ eV⁻¹ (4.4 × 10⁻⁴) |
+| 16 meV | 14.9 | 3.5 × 10⁻³ eV⁻¹ | 5.6 × 10⁻⁶ eV⁻¹ (2.5 × 10⁻⁶) |
+| 24 meV | 22.3 | 1.4 × 10⁻⁶ eV⁻¹ | 3.1 × 10⁻¹⁰ eV⁻¹ (1.0 × 10⁻¹⁰) |
+
+- Single precision with `drop = 1e-5` against double precision with the full matrix changes the LDoS
+  by the same amount for both kernels: 6.2 × 10⁻⁵ (Jackson) and 6.5 × 10⁻⁵ (η = 12 meV) in the
+  measure (5.2), 34 momenta, W = 0.3771, P = 4000.
+- For the momentum LDoS of this line cut the result still changes by about a third (measure (5.2))
+  each time the resolution is halved, with either kernel (Jackson P = 1000 → 8000; η = 48 → 6 meV):
+  its peaks are narrower than the resolutions reached, so the high order of the kernel does not show
+  there. At equal width the two kernels differ by 7.8 × 10⁻² (η = 12 meV against Jackson P = 4000).
+  The delta-Chebyshev LDoS of the line cut at W = 0.25 (η = 12 meV, P = 4000) is negative at 107 of
+  301 301 points, down to −0.9 % of the largest value at the same momentum.
+- Evaluating 1001 energies from 4000 moments takes 6 ms with the Jackson kernel and 45 ms with
+  m = 6, per momentum on one core.
+
+The order of convergence is tested on a density with known moments (the semicircle density, test
+set "delta-Chebyshev kernel"): orders 1, 2, 4, 4, 6, 6 for m = 1, …, 6 in η, and 2 in 1/P for Jackson.
+The total density of states, where the density is smooth, has not been run with this kernel.
 
 ## Line cut on a GPU
 
@@ -152,7 +212,8 @@ The LDoS on an energy grid, for any P′ ≤ P:
 F = kpm_density(view(μ, 1:P′), s, E) ./ 6          # s from meta.txt, at full precision
 ```
 
-`examples/ldos_from_moments.jl` does this for a whole folder.
+`examples/ldos_from_moments.jl` does this for a whole folder; with the arguments `eta=0.016 m=6` it
+uses the delta-Chebyshev kernel (see "Choice of the kernel").
 
 ### Choosing W and L
 
@@ -215,7 +276,8 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
 | `ldos_linecut.jl` | momentum LDoS along the path on the CPU, written as a table |
 | `production_linecut.jl` | CPU line cut with the same files as the GPU driver |
 | `ldos_convergence.jl` | W- and L-convergence of the LDoS at ten momenta (CPU) |
-| `ldos_from_moments.jl` | LDoS table from a folder of moments |
+| `ldos_from_moments.jl` | LDoS table from a folder of moments, with either kernel |
+| `kernel_argument.jl` | the arguments `eta=<η>` and `m=<order>` of `ldos_linecut.jl`, `ldos_from_moments.jl`, `moire_dos.jl` (delta-Chebyshev kernel) |
 | `moire_dos.jl` | density of states by the moiré-cell rule (4.39) |
 | `posteriori.jl` | a posteriori diagnostics of Lemma 4.4 |
 | `cross_check_relaxed.jl` | comparison with `RelaxedTTG.jl` at zero relaxation |
@@ -240,6 +302,8 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
   ‖Ĥ_q‖_∞ ≤ B_H for each matrix before the recurrence and stops if it fails.
 - `drop > 0` and `ComplexF32` change the computed LDoS by the measured amounts above; neither is
   covered by the error estimates of the manuscript.
+- The manuscript (Section 4.5 and its error estimates) is written for the Jackson kernel.
+  `DeltaChebyshev` is an alternative evaluation of the same moments and is not covered by it.
 - The W and L of sets 1 and 2 in `ANGLE_SETS` are the manuscript's values; (5.3)–(5.5) evaluated
   for a = 1.42√3 Å give 0.4748, 19.43 and 0.3777, 30.60 (fourth-digit difference).
 - `claim_directory` compares `meta.txt` as text, so a folder is refused when a parameter is passed

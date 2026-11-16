@@ -320,6 +320,98 @@ end
     @test_throws ErrorException U.scaled(sparse(Matrix(A)), s, 0.1)
 end
 
+@testset "delta-Chebyshev kernel (arXiv:2512.03149; SIAM Rev. 63 (2021) 489, Section 5)" begin
+    # poles (5.8) and the Vandermonde system (5.7) of Colbrook, Horning, Townsend
+    for m in 1:8
+        K = DeltaChebyshev(0.1, m)
+        @test K.z == [complex(2l / (m + 1) - 1, 1.0) for l in 1:m]
+        @test maximum(j -> abs(sum(K.w .* K.z .^ j) - (j == 0)), 0:m-1) < 1e-11 * sum(abs, K.w)
+        @test K.w ≈ conj.(reverse(K.w))                                  # α_{m+1−j} = conj(α_j)
+    end
+    # the residues of Table 5.1 (loc. cit.)
+    table = Dict(2 => [(1 + 3im) / 2], 3 => [-2 + im, 5], 4 => [(-39 - 65im) / 24, (17 + 85im) / 8],
+        5 => [(15 - 10im) / 4, (-39 + 13im) / 2, 65 / 2],
+        6 => [(725 + 1015im) / 192, (-2775 - 6475im) / 192, (1073 + 7511im) / 96])
+    for (m, α) in table
+        @test DeltaChebyshev(1.0, m).w[1:cld(m, 2)] ≈ α rtol = 1e-12
+    end
+    # m = 1 is the Lorentzian
+    @test DeltaChebyshev(0.3, 1)(0.2, -0.5) ≈ 0.3 / (π * (0.7^2 + 0.3^2))
+    # K_η(E, x) = η⁻¹ K((E − x)/η)
+    @test DeltaChebyshev(0.05, 6)(0.31, 0.2) ≈ DeltaChebyshev(1.0, 6)(0.11 / 0.05, 0.0) / 0.05
+    # the numerators N_m of Table 5.1: π K(u) ∏_l |u − z_l|² = N_m(u)
+    numerator = Dict(1 => u -> 1.0, 2 => u -> 20 / 9, 3 => u -> -5 / 4 * u^2 + 65 / 16,
+        4 => u -> -3536 / 625 * u^2 + 21216 / 3125, 5 => u -> 130 / 81 * u^4 - 12350 / 729 * u^2 + 70720 / 6561,
+        6 => u -> 1287600 / 117649 * u^4 - 34336000 / 823543 * u^2 + 667835200 / 40353607)
+    # kernel of order m (Definition 5.1): ∫K = 1 and ∫K(u) uʲ du = 0 for 0 < j < m, by the midpoint
+    # rule in u = tan t (the integrand is a smooth π-periodic function of t). The integrals use the
+    # quotient form, because the sum over the poles cancels to K(u) = O(|u|^{−(m+1)}) for large |u|:
+    # its rounding error is of the size ε ∑_l |w_l| (ε = 2⁻⁵², not relative to K(u)).
+    t = [π * (i - 1 / 2) / 4000 - π / 2 for i in 1:4000]
+    for m in 1:6
+        K = DeltaChebyshev(1.0, m)
+        quotient(u) = numerator[m](u) / (π * prod(z -> abs2(u - z), K.z))
+        @test all(u -> isapprox(K(u, 0.0), quotient(u); atol = 1e-14 * sum(abs, K.w)), -6:0.37:6)
+        for j in 0:m-1
+            integral = sum(tᵢ -> quotient(tan(tᵢ)) * tan(tᵢ)^j / cos(tᵢ)^2, t) * π / 4000
+            @test integral ≈ (j == 0) atol = 1e-9
+        end
+    end
+    @test minimum(u -> DeltaChebyshev(1.0, 2)(u, 0.0), -20:0.01:20) > 0
+    @test all(m -> minimum(u -> DeltaChebyshev(1.0, m)(u, 0.0), -20:0.01:20) < 0, 3:6)
+    @test_throws ArgumentError DeltaChebyshev(0.0, 4)
+    @test_throws ArgumentError DeltaChebyshev(0.1, 0)
+
+    # one eigenvalue x₀/s: μ_n = T_n(x₀), and the series must give K_η(E, x₀/s) up to the terms left out
+    s = 0.23
+    for m in (1, 2, 4, 6), (η, P) in ((0.2, 400), (0.05, 1200), (0.05, 300))
+        K = DeltaChebyshev(η, m)
+        E = range(-1.2 / s, 1.2 / s; length = 61)                         # |sE| > 1 is allowed
+        b = truncation_bound(K, s, E, P)
+        for x₀ in (-0.999, -0.4, 0.0, 0.77, 1.0)
+            μ = [cos(n * acos(x₀)) for n in 0:P-1]
+            error = abs.(kpm_density(μ, s, E; kernel = K) .- K.(E, x₀ / s))
+            @test all(error .≤ b .+ 1e-11 * sum(abs, K.w) / η)
+        end
+        P == 300 || @test maximum(b) < 1e-3 * K(0.0, 0.0)                 # here the bound is small …
+        P == 300 && @test maximum(b) > 1e-3 * K(0.0, 0.0)                 # … and here it reports too few moments
+    end
+    @test truncation_bound(DeltaChebyshev(0.05, 6), s, 0.1, 500) ≈ truncation_bound(DeltaChebyshev(0.05, 6), s, [0.1], 500)[1]
+
+    # a Hermitian matrix: against the kernel applied to the eigenvalues
+    A = Hermitian(randn(ComplexF64, 60, 60))
+    s = 0.95 / opnorm(A)
+    decomposition = eigen(A)
+    weight = abs2.(decomposition.vectors[7, :]) .+ abs2.(decomposition.vectors[12, :])
+    P = 3000
+    μ = chebyshev_moments(sparse(s * A), [7, 12], P)
+    E = range(-1 / s, 1 / s; length = 101)
+    for m in (2, 6)
+        K = DeltaChebyshev(0.012 / s, m)
+        exact = [sum(weight .* K.(Eᵢ, decomposition.values)) for Eᵢ in E]
+        ρ = kpm_density(μ, s, E; kernel = K)
+        @test maximum(abs, ρ - exact) ≤ 2 * maximum(truncation_bound(K, s, E, P)) + 1e-9 * maximum(abs, exact)
+        @test maximum(truncation_bound(K, s, E, P)) < 1e-8 * maximum(abs, exact)
+        @test kpm_density!(zeros(101), μ, s, E; kernel = K) == ρ
+    end
+    @test kpm_density(μ, s, E[2:end-1]; kernel = Jackson()) == kpm_density(μ, s, E[2:end-1])
+    @test kpm_resolution(s, P, Jackson()) == kpm_resolution(s, P) == π / (s * P)
+    @test kpm_resolution(s, P, DeltaChebyshev(0.004, 6)) == 0.004
+
+    # order of convergence at a smooth point: the semicircle density (2/π)√(1 − x²) has the moments
+    # μ_0 = 1, μ_2 = −1/2 and μ_n = 0 otherwise, so the series is exact from three moments
+    μ = [1.0, 0.0, -0.5]
+    semicircle(x) = 2 * sqrt(1 - x^2) / π
+    for m in 1:6
+        error(η) = abs(kpm_density(μ, 1.0, [0.3]; kernel = DeltaChebyshev(η, m))[1] - semicircle(0.3))
+        order = log2(error(0.04) / error(0.02))
+        @test m - 0.5 < order < m + 1.5
+    end
+    # the Jackson kernel on the same density: second order in 1/P
+    jackson_error(P) = abs(kpm_density([μ; zeros(P - 3)], 1.0, [0.3])[1] - semicircle(0.3))
+    @test 1.5 < log2(jackson_error(200) / jackson_error(400)) < 2.5
+end
+
 @testset "momentum LDoS (eq. (4.36), convention (4.10))" begin
     E = range(-0.4, 0.4; length = 81)
     q = [stack.K[2] + SVector(0.01, 0.02), stack.K[2] + SVector(0.3, 0.0), stack.K[1]]
@@ -339,6 +431,17 @@ end
     dense = sum(o -> gaussian_density(H, o, E, result.resolution), start) / 6
     @test norm(result.ldos[1, :] - dense) < 0.1 * norm(dense)
     @test result.resolution ≈ π / (result.s * P)
+    @test result.kernel === Jackson()
+    # the same moments with the delta-Chebyshev kernel
+    K = DeltaChebyshev(0.15, 4)
+    high = momentum_ldos(model, q, E; W, L, P, kernel = K)
+    @test high.μ == result.μ && high.kernel === K && high.resolution == 0.15
+    @test high.ldos[1, :] ≈ kpm_density(μ, result.s, E; kernel = K) / 6
+    @test all(iszero, high.ldos[2, :])
+    decomposition = eigen(Hermitian(Matrix(H)))
+    weight = vec(sum(abs2, view(decomposition.vectors, start, :); dims = 1))
+    exact = [sum(weight .* K.(Eᵢ, decomposition.values)) for Eᵢ in E] / 6
+    @test maximum(abs, high.ldos[1, :] - exact) ≤ maximum(truncation_bound(K, result.s, E, P)) + 1e-9
     path = linecut(stack, 4)
     @test length(path.q) == 21 && path.q[1] ≈ stack.K[1] && path.q[end] ≈ stack.K[3]
     @test path.q[5] ≈ stack.K[2] && path.q[17] ≈ stack.K[2]
@@ -376,6 +479,13 @@ end
     @test grid.points == [2, 2, 2]                        # K_j and K′_j are grid points for 3 | N
     @test grid.mass ≈ 3 * 2 * 2 / (6 * 36)
     @test all(>(0), grid.ρ)
+    # the same weighted moments with the delta-Chebyshev kernel
+    K = DeltaChebyshev(0.3, 3)
+    high = moire_dos(model, E; W, L, N = 2, P = 64, kernel = K)
+    @test high.μ == coarse.μ && high.kernel === K && high.resolution == 0.3 && coarse.kernel === Jackson()
+    @test high.ρ == kpm_density(coarse.μ, coarse.s, E; kernel = K)
+    high = brillouin_dos(model, E; W, L, N = 6, P = 64, kernel = K)
+    @test high.μ == grid.μ && high.ρ == kpm_density(grid.μ, grid.s, E; kernel = K)
 end
 
 @testset "a posteriori bounds (Lemma 4.4, Remark 4.5, Lemma C.4)" begin

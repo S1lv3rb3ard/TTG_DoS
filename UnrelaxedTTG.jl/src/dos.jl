@@ -76,7 +76,7 @@ function linecut(stack::Stack, Nq::Integer; Γ::Symbol = :moire)
 end
 
 """
-    momentum_ldos(model, q, E; W, L, P, δ_s = 0.05, B_H = nothing) -> result
+    momentum_ldos(model, q, E; W, L, P, δ_s = 0.05, B_H = nothing, kernel = Jackson()) -> result
 
 The computed momentum LDoS of eq. (4.36) at the momenta `q` (a vector of
 momenta or a [`Linecut`](@ref)) and energies `E` (eV):
@@ -87,12 +87,17 @@ A zero label that is not in the window contributes zero (convention (4.10)).
 The window is rebuilt for every q. The momenta are distributed over the
 available threads.
 
+With `kernel = DeltaChebyshev(η, m)` the regularisation δ^P_KPM is replaced by the rational kernel
+K_η of order m, evaluated from the same P moments ([`kpm_density`](@ref),
+[`truncation_bound`](@ref)); `kernel = Jackson()` is (4.36).
+
 `result`: `E`, `q`, `ldos` (momenta × energies), `μ` (momenta × P, summed over
-the zero-label orbitals present), `s`, `B_H`, `resolution` = ε_P, `labels`
-(number of labels per q) and `present` (number of zero labels in the window).
+the zero-label orbitals present), `s`, `B_H`, `kernel`, `resolution` (ε_P for the Jackson kernel,
+η for `DeltaChebyshev`; [`kpm_resolution`](@ref)), `labels` (number of labels per q) and `present`
+(number of zero labels in the window).
 """
 function momentum_ldos(model::Model{T}, q::AbstractVector, E; W, L, P::Integer, δ_s::Real = 0.05,
-        B_H::Union{Nothing,Real} = nothing) where {T}
+        B_H::Union{Nothing,Real} = nothing, kernel::Kernel = Jackson()) where {T}
     s, bound = kpm_scale(model, E; δ_s, B_H)
     μ = zeros(length(q), P)
     ldos = zeros(length(q), length(E))
@@ -102,12 +107,12 @@ function momentum_ldos(model::Model{T}, q::AbstractVector, E; W, L, P::Integer, 
         start = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
         H̃ = scaled(hamiltonian(model, window), s, bound)
         μ[i, :] = chebyshev_moments(H̃, start, P)
-        kpm_density!(view(ldos, i, :), view(μ, i, :), s, E)
+        kpm_density!(view(ldos, i, :), view(μ, i, :), s, E, kernel)
         labels[i], present[i] = length(window), length(start) ÷ 2
     end
     ldos ./= 6
-    return (E = collect(E), q = collect(q), ldos = ldos, μ = μ, s = s, B_H = bound,
-        resolution = kpm_resolution(s, P), labels = labels, present = present)
+    return (E = collect(E), q = collect(q), ldos = ldos, μ = μ, s = s, B_H = bound, kernel = kernel,
+        resolution = kpm_resolution(s, P, kernel), labels = labels, present = present)
 end
 
 momentum_ldos(model::Model, path::Linecut, E; kwargs...) = momentum_ldos(model, path.q, E; kwargs...)
@@ -126,7 +131,8 @@ function moire_cell(stack::Stack, j::Integer; layer2::Integer = 1)
 end
 
 """
-    moire_dos(model, E; W, L, N, P, δ_s = 0.05, B_H = nothing, layer2 = 1, batch = 64, verbose = false) -> result
+    moire_dos(model, E; W, L, N, P, δ_s = 0.05, B_H = nothing, kernel = Jackson(), layer2 = 1, batch = 64,
+              verbose = false) -> result
 
 The moiré-cell rule of eq. (4.39) for the density of states,
 
@@ -142,13 +148,19 @@ hypothesis √3 β_jk ≤ W_j is checked.
 A centre label with ‖B_k m‖₂ ≥ L_j is not in ℒ*(L) and is skipped; the number of
 skipped centres is returned in `missing` (increase L until it is 0).
 
-`result`: `E`, `ρ`, `μ` (weighted moments), `s`, `B_H`, `resolution`, `mass` =
+`kernel = DeltaChebyshev(η, m)` evaluates the same weighted moments with the rational kernel K_η of
+order m in place of δ^P_KPM ([`kpm_density`](@ref)); the weights of the rule are positive, so
+[`truncation_bound`](@ref) applies with μ₀ = `mass`.
+
+`result`: `E`, `ρ`, `μ` (weighted moments), `s`, `B_H`, `kernel`, `resolution` (ε_P or η,
+[`kpm_resolution`](@ref)), `mass` =
 μ₀ (the weight of the sampled centres), `disk_mass` = ν* · 4π ∑_j W_j² (its limit
 as N → ∞), `point_moments[g]` (N² × P, one array per layer and valley, in the
 order j = 1, 2, 3 and K, K′), `centres`, `missing`, `labels` (largest window).
 """
 function moire_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::Real = 0.05,
-        B_H::Union{Nothing,Real} = nothing, layer2::Integer = 1, batch::Integer = 64, verbose::Bool = false) where {T}
+        B_H::Union{Nothing,Real} = nothing, kernel::Kernel = Jackson(), layer2::Integer = 1, batch::Integer = 64,
+        verbose::Bool = false) where {T}
     N ≥ 1 || throw(ArgumentError("N must be a positive integer"))
     stack = model.stack
     Wⱼ, Lⱼ = triple(T, W), triple(T, L)
@@ -192,13 +204,13 @@ function moire_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::Real 
     end
     sum(missing_centres) == 0 || @warn "$(sum(missing_centres)) centre labels lie outside ℒ*(L) and were skipped; " *
         "the corresponding part of the disks is not sampled. Increase L."
-    return (E = collect(E), ρ = kpm_density(μ, s, E), μ = μ, s = s, B_H = bound, resolution = kpm_resolution(s, P),
-        mass = μ[1], disk_mass = ν * 4π * sum(abs2, Wⱼ), point_moments = point_moments, centres = centres,
+    return (E = collect(E), ρ = kpm_density(μ, s, E; kernel), μ = μ, s = s, B_H = bound, kernel = kernel,
+        resolution = kpm_resolution(s, P, kernel), mass = μ[1], disk_mass = ν * 4π * sum(abs2, Wⱼ), point_moments = point_moments, centres = centres,
         missing = missing_centres, labels = maximum(largest))
 end
 
 """
-    brillouin_dos(model, E; W, L, N, P, δ_s = 0.05, B_H = nothing) -> result
+    brillouin_dos(model, E; W, L, N, P, δ_s = 0.05, B_H = nothing, kernel = Jackson()) -> result
 
 The Brillouin-zone quadrature 𝒯_N of eq. (4.1) applied to the truncated
 operator, D̂_P^{(N,τ,W,L)}(E) with KPM in place of δ_ε:
@@ -208,11 +220,11 @@ operator, D̂_P^{(N,τ,W,L)}(E) with KPM in place of δ_ε:
 𝔖_j(N) = {B_j n/N : n ∈ {0,…,N−1}²}. By the convention (4.10) only the grid
 points with ‖q − K̃_j‖₂ < W_j contribute. This grid is fine on the atomic scale
 and coarse on the moiré scale; [`moire_dos`](@ref) is the rule used for the
-figures. `result`: `E`, `ρ`, `μ`, `s`, `B_H`, `resolution`, `mass` = μ₀, `points`
-(number of contributing grid points per layer).
+figures. `kernel` as in [`moire_dos`](@ref). `result`: `E`, `ρ`, `μ`, `s`, `B_H`, `kernel`,
+`resolution`, `mass` = μ₀, `points` (number of contributing grid points per layer).
 """
 function brillouin_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::Real = 0.05,
-        B_H::Union{Nothing,Real} = nothing) where {T}
+        B_H::Union{Nothing,Real} = nothing, kernel::Kernel = Jackson()) where {T}
     stack = model.stack
     Wⱼ, Lⱼ = triple(T, W), triple(T, L)
     s, bound = kpm_scale(model, E; δ_s, B_H)
@@ -231,6 +243,6 @@ function brillouin_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::R
         μ .+= w .* vec(sum(moments; dims = 1))
         points[j] = length(q)
     end
-    return (E = collect(E), ρ = kpm_density(μ, s, E), μ = μ, s = s, B_H = bound, resolution = kpm_resolution(s, P),
-        mass = μ[1], points = points)
+    return (E = collect(E), ρ = kpm_density(μ, s, E; kernel), μ = μ, s = s, B_H = bound, kernel = kernel,
+        resolution = kpm_resolution(s, P, kernel), mass = μ[1], points = points)
 end

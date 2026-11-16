@@ -32,7 +32,9 @@ momentum q of the path:
    zero labels present in the window (at most six), and writes them to `mu_<index>.bin`.
 
 The LDoS is recovered afterwards as `kpm_density(μ, s, E) ./ 6` with the `s` of `meta.txt`
-(the division by six, not by the number of orbitals present, is the convention (4.10)).
+(the division by six, not by the number of orbitals present, is the convention (4.10)). The moments
+do not depend on the regularisation kernel: `kpm_density(μ, s, E; kernel = DeltaChebyshev(η, m)) ./ 6`
+evaluates the same files with the delta-Chebyshev kernel of arXiv:2512.03149.
 
 Keyword arguments:
 

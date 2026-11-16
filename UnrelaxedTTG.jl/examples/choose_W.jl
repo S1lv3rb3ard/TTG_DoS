@@ -21,6 +21,11 @@ using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
 
 # `triple_parameters(set)` (θ, default W and L of the angle triples) is exported by UnrelaxedTTG; `linecut_gpu` is not
 # used here, so this file can be included on its own.
+#
+# The keyword `kernel` of `choose_W` and `sweep_L` selects the regularisation of the LDoS that is
+# compared: `Jackson()` (default, as described above) or `DeltaChebyshev(η, m)` (arXiv:2512.03149).
+
+include(joinpath(@__DIR__, "kernel_argument.jl"))            # kernel_text
 
 """Relative difference (5.2): max_Σ |F − F_ref| / max_Σ |F_ref|."""
 relative_difference(F, F_ref) = maximum(abs, F .- F_ref) / maximum(abs, F_ref)
@@ -38,13 +43,13 @@ function build(model, q, W, L)
 end
 
 """
-    gpu_ldos(H, present, s, B_H, P; precision, drop, E) -> (F, seconds, μ)
+    gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel = Jackson()) -> (F, seconds, μ)
 
-F(E) = (1/6) ∑ over the zero-label orbitals of [δ^P_KPM(E, H)]_cc on the energies E, from moments
+F(E) = (1/6) ∑ over the zero-label orbitals of [δ^P_KPM(E, H)]_cc (or of the kernel `kernel`) on the energies E, from moments
 computed on the GPU at the scale s after removing the entries with |h| ≤ drop (eV). `seconds` is
 the time of the upload and the recurrence.
 """
-function gpu_ldos(H, present, s, B_H, P; precision = ComplexF32, drop = 1e-5, E)
+function gpu_ldos(H, present, s, B_H, P; precision = ComplexF32, drop = 1e-5, E, kernel = Jackson())
     drop > 0 && (H = droptol!(copy(H), drop))
     S = SlicedELL(UnrelaxedTTG.scaled(H, s, B_H), precision; reach = present)   # rows reachable from the zero labels
     t = time()
@@ -52,7 +57,7 @@ function gpu_ldos(H, present, s, B_H, P; precision = ComplexF32, drop = 1e-5, E)
     μ = chebyshev_moments(H̃, present, P)
     CUDA.unsafe_free!(H̃)
     seconds = time() - t
-    return kpm_density(μ, s, E) ./ 6, seconds, μ
+    return kpm_density(μ, s, E; kernel) ./ 6, seconds, μ
 end
 
 """The matrices of one momentum for several (W, L), assembled on parallel CPU threads."""
@@ -90,7 +95,7 @@ candidates), `W_ref`, `momenta`, `difference` (candidates × momenta), `labels` 
 function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int = 60,
                   momenta = 1:30:(5Nq + 1), floor_momenta = (first(momenta), momenta[cld(length(momenta), 2)]),
                   precision::Type = ComplexF32, drop::Real = 1e-5,
-                  E = range(-0.2, 0.2; length = 4001), log::IO = stdout, directory = nothing)
+                  E = range(-0.2, 0.2; length = 4001), log::IO = stdout, directory = nothing, kernel = Jackson())
     θ = triple_parameters(set)[1]
     stack = Stack(1.42 * √3, θ)
     model = Model(stack; τ = 8.5, δ = 6.5)
@@ -99,8 +104,8 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
     s = 0.95 / B_H
     Ws = sort(collect(Float64, candidates))
     all(<(W_ref), Ws) || throw(ArgumentError("every candidate must be smaller than W_ref"))
-    @printf(log, "θ = %s, L = %.2f, P = %d, B_H = %.4f eV (from W_ref = %.4f), ε_P = %.3f meV, %s, drop %.0e eV\n",
-        string(θ), L, P, B_H, W_ref, 1e3 * kpm_resolution(s, P), precision, drop); flush(log)
+    @printf(log, "θ = %s, L = %.2f, P = %d, B_H = %.4f eV (from W_ref = %.4f), %s, %s, drop %.0e eV\n",
+        string(θ), L, P, B_H, W_ref, kernel_text(kernel, s, P), precision, drop); flush(log)
     difference = zeros(length(Ws), length(momenta))
     labels = zeros(Int, length(Ws) + 1, length(momenta))
     seconds = zeros(length(Ws) + 1, length(momenta))
@@ -110,16 +115,16 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
     for (column, i) in enumerate(momenta)
         built = build_all(model, path.q[i], [(W, L) for W in [Ws; W_ref]])
         H, present, labels[end, column] = built[end]
-        F_ref, seconds[end, column], μ = gpu_ldos(H, present, s, B_H, P; precision, drop, E)
+        F_ref, seconds[end, column], μ = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
         moments === nothing || (moments[(W_ref, i)] = μ)
         if i in floor_momenta
-            F₆₄, = gpu_ldos(H, present, s, B_H, P; precision = ComplexF64, drop = 0.0, E)
+            F₆₄, = gpu_ldos(H, present, s, B_H, P; precision = ComplexF64, drop = 0.0, E, kernel)
             floor_values[i] = relative_difference(F_ref, F₆₄)
         end
         line = @sprintf("q %4d:", i)
         for (row, W) in enumerate(Ws)
             H, present, labels[row, column] = built[row]
-            F, seconds[row, column], μ = gpu_ldos(H, present, s, B_H, P; precision, drop, E)
+            F, seconds[row, column], μ = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
             moments === nothing || (moments[(W, i)] = μ)
             difference[row, column] = relative_difference(F, F_ref)
             line *= @sprintf(" W = %.3f: %.1e (%d labels, %.1f s);", W, difference[row, column], labels[row, column], seconds[row, column])
@@ -161,26 +166,27 @@ The L-difference at fixed W: the relative difference (5.2) of F_L(q, ·) to F_{L
 momenta `momenta` of the line cut, at the common scale s = 0.95/B_H (pass the B_H of the W-sweep).
 """
 function sweep_L(; set::Int, W::Real, Ls, L_ref::Real, P::Int, B_H::Real, Nq::Int = 60, momenta = 1:60:(5Nq + 1),
-                 precision::Type = ComplexF32, drop::Real = 1e-5, E = range(-0.2, 0.2; length = 4001), log::IO = stdout)
+                 precision::Type = ComplexF32, drop::Real = 1e-5, E = range(-0.2, 0.2; length = 4001), log::IO = stdout,
+                 kernel = Jackson())
     θ = triple_parameters(set)[1]
     stack = Stack(1.42 * √3, θ)
     model = Model(stack; τ = 8.5, δ = 6.5)
     path = linecut(stack, Nq)
     s = 0.95 / B_H
     Ls = sort(collect(Float64, Ls))
-    @printf(log, "θ = %s, W = %.4f, L_ref = %.3f, P = %d, B_H = %.4f eV, ε_P = %.3f meV, %s, drop %.0e eV\n",
-        string(θ), W, L_ref, P, B_H, 1e3 * kpm_resolution(s, P), precision, drop); flush(log)
+    @printf(log, "θ = %s, W = %.4f, L_ref = %.3f, P = %d, B_H = %.4f eV, %s, %s, drop %.0e eV\n",
+        string(θ), W, L_ref, P, B_H, kernel_text(kernel, s, P), precision, drop); flush(log)
     difference = zeros(length(Ls), length(momenta))
     labels = zeros(Int, length(Ls) + 1, length(momenta))
     seconds = zeros(length(Ls) + 1, length(momenta))
     for (column, i) in enumerate(momenta)
         built = build_all(model, path.q[i], [(W, L) for L in [Ls; L_ref]])
         H, present, labels[end, column] = built[end]
-        F_ref, seconds[end, column] = gpu_ldos(H, present, s, B_H, P; precision, drop, E)
+        F_ref, seconds[end, column] = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
         line = @sprintf("q %4d:", i)
         for (row, L) in enumerate(Ls)
             H, present, labels[row, column] = built[row]
-            F, seconds[row, column] = gpu_ldos(H, present, s, B_H, P; precision, drop, E)
+            F, seconds[row, column] = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
             difference[row, column] = relative_difference(F, F_ref)
             line *= @sprintf(" L = %.2f: %.1e (%d labels, %.1f s);", L, difference[row, column], labels[row, column], seconds[row, column])
         end

@@ -1,7 +1,10 @@
 # Momentum LDoS along the path K₁–K₂–Γ₁₂–Γ₂₃–K₂–K₃ (manuscript, Figure 5.2(b)) at the
 # parameters of Section 5: θ = (−1.4°, 0°, 2.8°), τ = 8.5, δ = 6.5, W = 0.4742, L = 19.40.
 #
-#   julia -t auto --project=. examples/ldos_linecut.jl [P] [Nq] [output file] [legacy]
+#   julia -t auto --project=. examples/ldos_linecut.jl [P] [Nq] [output file] [legacy] [eta=<η>] [m=<order>]
+#
+# With `eta=<η>` (eV) the moments are evaluated with the delta-Chebyshev kernel of order m
+# (default 6) of arXiv:2512.03149 instead of the Jackson kernel (`kernel_argument.jl`).
 #
 # With the fourth argument `legacy` the path uses the older Γ points of
 # `getLinecut(K, Nq, 'legacy')` and the intralayer model is that of TTG_DoS
@@ -14,7 +17,9 @@
 # length s (Å⁻¹) followed by the LDoS at every energy (1/eV).
 
 using UnrelaxedTTG, Printf
+include(joinpath(@__DIR__, "kernel_argument.jl"))
 
+kernel = kernel_argument!(ARGS)
 P = length(ARGS) ≥ 1 ? parse(Int, ARGS[1]) : 8000
 Nq = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 20
 output = length(ARGS) ≥ 3 ? ARGS[3] : "ldos_linecut.txt"
@@ -27,9 +32,11 @@ W, L = 0.4742, 19.40
 path = linecut(stack, Nq; Γ = legacy ? :legacy : :moire)
 E = range(-0.5, 0.5; length = 501)
 B_H, 𝔍 = spectral_bound(model, W)          # ‖Ĥ_q^{(τ,W,L)}‖ ≤ B_H for this W; eq. (4.35) is `spectral_bound(model)`
-elapsed = @elapsed result = momentum_ldos(model, path, E; W, L, P, B_H)
+elapsed = @elapsed result = momentum_ldos(model, path, E; W, L, P, B_H, kernel)
 
-@printf("B_H = %.4f eV, 𝔍 = %.4f eV, s = %.5f 1/eV, ε_P = %.3f meV\n", B_H, 𝔍, result.s, 1e3 * result.resolution)
+@printf("B_H = %.4f eV, 𝔍 = %.4f eV, s = %.5f 1/eV, %s\n", B_H, 𝔍, result.s, kernel_text(kernel, result.s, P))
+kernel isa DeltaChebyshev && @printf("terms beyond P = %d: at most %.1e per eV (truncation_bound)\n", P,
+    maximum(truncation_bound(kernel, result.s, E, P)))
 @printf("%d momenta, %d–%d labels per window, %.1f s on %d threads\n", length(path.q), extrema(result.labels)...,
     elapsed, Threads.nthreads())
 open(output, "w") do io
