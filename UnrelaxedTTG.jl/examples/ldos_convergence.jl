@@ -12,8 +12,7 @@ BLAS.set_num_threads(1)                                   # the momenta are dist
 
 set, directory = parse(Int, ARGS[1]), ARGS[2]
 budget = length(ARGS) ≥ 3 ? parse(Float64, ARGS[3]) : Inf
-θ, W₀, L₀ = set == 1 ? ((-1.4, 0.0, 2.8), 0.4742, 19.40) : set == 2 ? ((-√3 / 2, 0.0, √2 / 2), 0.3771, 30.56) :
-    ((-1.39, 0.0, 2.4), 0.4596, 18.95)
+θ, W₀, L₀ = triple_parameters(set)                       # throws for an unknown set
 configurations = set != 2 ?
     [(W₀, L₀), (W₀, 1.5L₀), (0.60, L₀), (0.60, 1.5L₀), (0.70, 2L₀)] :
     [(W₀, L₀), (W₀, 1.25L₀), (0.45, L₀), (0.45, 1.25L₀)]
@@ -33,12 +32,12 @@ B_H, _ = spectral_bound(model, Wmax)
 s = 0.95 / B_H
 P = 2 * round(Int, 8000 * B_H / spectral_bound(model, W₀)[1] / 2)     # ε_P as in the production run
 haskey(ENV, "LDOS_P") && (P = parse(Int, ENV["LDOS_P"]))                # optional: prescribe the Chebyshev order
-mkpath(directory)
-open(joinpath(directory, "meta.txt"), "w") do io
+meta = sprint() do io
     println(io, "theta ", join(θ, " ")); println(io, "P ", P); println(io, "s ", s); println(io, "B_H ", B_H)
     println(io, "configurations ", join(["$(c[1]),$(c[2])" for c in configurations], " "))
     println(io, "points ", join(["$(p[1]),$(p[2])" for p in points], " "))
 end
+claim_directory(directory, meta)                         # throws if the folder holds moments of a run with other parameters
 file(c, i) = joinpath(directory, @sprintf("mu_%d_%02d.bin", c, i))
 # the reference (last) configuration is computed at the five vertices of the path only
 vertices = (1, 3, 5, 7, 10)

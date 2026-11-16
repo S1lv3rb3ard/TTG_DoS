@@ -3,6 +3,12 @@ using LinearAlgebra, Random, SparseArrays, StaticArrays, Test
 
 const U = UnrelaxedTTG
 
+# The GPU test set at the end runs only if CUDA.jl is in the active environment and a device is
+# usable. CUDA.jl is not a test dependency, so `Pkg.test` skips it; to run it, start this file in
+# an environment that has UnrelaxedTTG, CUDA and StaticArrays.
+const HAS_CUDA = Base.find_package("CUDA") !== nothing
+HAS_CUDA && @eval using CUDA
+
 Random.seed!(20261111)
 const stack = Stack(1.42 * √3, (-1.4, 0.0, 2.8))
 const model = Model(stack; τ = 8.5, δ = 6.5)
@@ -200,6 +206,30 @@ end
             @test Matrix(H[collect(orbitals(s)), collect(orbitals(s′))]) ≈ block atol = 1e-14
         end
     end
+    # `hamiltonian` looks a label up before it evaluates its block; assembling from `neighbours`,
+    # which evaluates every candidate, gives the same matrix entry for entry
+    Is, Js, Vs = Int[], Int[], ComplexF64[]
+    for (s, x) in enumerate(window.labels)
+        h̃ = bloch(model.shells, stack, x.layer, momentum(stack, q, x); E_D = model.E_D)
+        for β in 1:2, α in 1:2
+            push!(Is, 2s - 2 + α); push!(Js, 2s - 2 + β); push!(Vs, h̃[α, β])
+        end
+        U.neighbours(model, q, x; upper = true) do y, block
+            s′ = get(window.index, y, 0)
+            s′ == 0 && return
+            for β in 1:2, α in 1:2
+                push!(Is, 2s - 2 + α); push!(Js, 2s′ - 2 + β); push!(Vs, block[α, β])
+                push!(Is, 2s′ - 2 + β); push!(Js, 2s - 2 + α); push!(Vs, conj(block[α, β]))
+            end
+        end
+    end
+    @test sparse(Is, Js, Vs, size(H)...) == H
+    # the candidates of a label are the labels of its nonzero blocks and of the blocks that vanish
+    x = window.labels[1]
+    all_candidates, nonzero = Label[], Label[]
+    U.candidates((y, b, p, G′ₐ, φ_b) -> push!(all_candidates, y), model, q, x)
+    U.neighbours((y, block) -> push!(nonzero, y), model, q, x)
+    @test allunique(all_candidates) && nonzero ⊆ all_candidates && !isempty(nonzero)
     # the diagonal blocks are the Bloch matrices at k_x
     for s in (1, length(window) ÷ 2, length(window))
         x = window.labels[s]
@@ -393,6 +423,64 @@ end
     𝔰, g = escape_norm(model, window, W₀, orbital; Σ, ε, η)
     @test maximum(gaussian_density(H_X, orbital, E, ε)) ≤ bracket_bound(𝔰, g, ε, η)
     @test_throws ArgumentError escape_norm(model, window, W₀, orbitals(zero_label(window, 2))[1]; Σ, ε, η)
+end
+
+@testset "angle sets and output folders of the drivers" begin
+    @test triple_parameters(1) == ((-1.4, 0.0, 2.8), 0.4742, 19.40)
+    @test triple_parameters(4) == ((-1.39, 0.0, 2.8), 0.4744, 19.555)
+    @test length(ANGLE_SETS) == 4
+    @test_throws ArgumentError triple_parameters(0)
+    @test_throws ArgumentError triple_parameters(5)
+    # rule (5.5), L = W / min|θ_j| with the angle in radians, for the four sets
+    for (θ, W, L) in triple_parameters.(1:4)
+        @test L ≈ W / deg2rad(minimum(abs, filter(!iszero, collect(θ)))) rtol = 2e-3
+    end
+    mktempdir() do directory
+        folder = joinpath(directory, "run")
+        meta = "theta -1.4 0.0 2.8\nW 0.4742\nP 100\n"
+        @test read(claim_directory(folder, meta), String) == meta
+        # no moments yet: another description takes the folder over
+        other = "theta -1.4 0.0 2.8\nW 0.4\nP 200\n"
+        claim_directory(folder, other)
+        @test read(joinpath(folder, "meta.txt"), String) == other
+        # with moments: the same description is accepted (line endings are not compared), another is refused
+        write(joinpath(folder, "mu_0001.bin"), zeros(200))
+        claim_directory(folder, other)
+        claim_directory(folder, replace(other, "\n" => "\r\n"))
+        claim_directory(folder, other)
+        refusal = try claim_directory(folder, meta); nothing catch e; e end
+        @test refusal isa ArgumentError && occursin("P, W", refusal.msg)
+        @test read(joinpath(folder, "meta.txt"), String) == other          # nothing was written
+        # moments without meta.txt cannot be attributed
+        rm(joinpath(folder, "meta.txt"))
+        @test_throws ArgumentError claim_directory(folder, other)
+    end
+end
+
+@testset "GPU recurrence (extension UnrelaxedTTGCUDAExt)" begin
+    if HAS_CUDA && CUDA.functional()
+        q = stack.K[2] + SVector(0.01, 0.02)
+        W = 0.25
+        window = Window(stack, q, W, 6.0)
+        B_H, _ = spectral_bound(model, W)
+        s = 0.95 / B_H
+        H̃ = U.scaled(hamiltonian(model, window), s, B_H)
+        start = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+        @test length(start) == 6
+        # the upload is the matrix itself, also after the conversion to single precision
+        A = sprand(ComplexF64, 40, 40, 0.2)
+        @test SparseMatrixCSC(gpu_matrix(A)) == A
+        @test SparseMatrixCSC(gpu_matrix(A, ComplexF32)) == SparseMatrixCSC{ComplexF32,Int32}(A)
+        # the same moments as on the CPU, for even and odd P
+        for P in (1, 2, 3, 4, 7, 200, 201)
+            μ = chebyshev_moments(H̃, start, P)
+            @test chebyshev_moments(gpu_matrix(H̃), start, P) ≈ μ atol = 1e-11
+            @test chebyshev_moments(gpu_matrix(H̃, ComplexF32), start, P) ≈ μ atol = 1e-4
+        end
+        @test chebyshev_moments(gpu_matrix(H̃), Int[], 5) == zeros(5)
+    else
+        @info "GPU test set skipped: CUDA.jl is not in the environment, or no device is usable"
+    end
 end
 
 end

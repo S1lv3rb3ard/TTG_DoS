@@ -62,6 +62,7 @@ include("window.jl")          # labels, W- and L-truncation, connectedness searc
 include("hamiltonian.jl")     # Model and the assembly of Ĥ_q^{(τ,W,L)}
 include("reference.jl")       # slow reference implementations for tests
 include("kpm.jl")             # Jackson-kernel Chebyshev moments and densities
+include("parameters.jl")     # angle triples of Section 5, output folders of the drivers
 include("dos.jl")             # momentum LDoS, Brillouin-zone and moiré-cell DoS
 include("posteriori.jl")      # a posteriori bound of the W-truncation (Lemma 4.4)
 
@@ -72,6 +73,7 @@ export Shells, jung_macdonald, bloch, dirac_energy, intralayer_bound, band_gap
 export InterlayerParameters, FANG_KAXIRAS, interlayer_hopping, HankelTable, hankel, fourier_hopping
 export Label, Window, zero_label, shifted_momentum, momentum, dimension, orbitals, search_window
 export Model, hamiltonian, interlayer_entry, neighbours, interlayer_row_sum, spectral_bound
+export ANGLE_SETS, triple_parameters, claim_directory
 export reference_hamiltonian, reference_fourier_hopping, reference_bloch, gaussian_density, reference_moments
 export jackson, kpm_density, kpm_density!, chebyshev_moments, kpm_resolution, gpu_matrix
 export Linecut, linecut, momentum_ldos, moire_cell, moire_dos, brillouin_dos

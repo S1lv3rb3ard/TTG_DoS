@@ -6,38 +6,14 @@
 # The Hamiltonians Ĥ_q^{(τ,W,L)} are assembled on the CPU threads (`builders` tasks) and
 # passed through a bounded queue to `consumers` GPU tasks, each of which runs the
 # Chebyshev recurrence for the six zero-label orbitals of one momentum as one
-# sparse-times-dense product per step. Finished momenta (mu_<index>.bin) are skipped.
+# sparse-times-dense product per step. Finished momenta (mu_<index>.bin) are skipped; a folder
+# with moments of other parameters is refused, and the first error of a task stops the run.
 # `precision = ComplexF32` runs the recurrence in single precision; `drop` (eV) removes the
 # matrix entries with |h| ≤ drop before the recurrence (0 keeps the full matrix).
 # `B_H` (eV) overrides the bound spectral_bound(model, W), e.g. to keep the KPM scale of the W-sweep of
 # `choose_W.jl`. `cpu_workers` further tasks compute whole momenta on the CPU (same precision and matrix).
 
 using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
-
-"""
-    triple_parameters(set) -> (θ, W, L)
-
-θ (degrees), default W = (W₁ + W*)/2 and default L (rule (5.5)) of the angle triples (Section 5).
-`set = 4` was added on 16 November 2026; its W₁ = 0.3102 was computed with the formula of Section 5.
-
-| set | θ (degrees)        | W (Å⁻¹) | L (Å⁻¹) |
-|-----|--------------------|---------|---------|
-| 1   | (−1.4, 0, 2.8)     | 0.4742  | 19.40   |
-| 2   | (−√3/2, 0, √2/2)   | 0.3771  | 30.56   |
-| 3   | (−1.39, 0, 2.4)    | 0.4596  | 18.95   |
-| 4   | (−1.39, 0, 2.8)    | 0.4744  | 19.555  |
-
-Sets 1 and 2 are the triples of the manuscript with its values of W and L. Sets 3 and 4 follow
-(5.3)–(5.5) evaluated with this package (a = 1.42√3 Å); the same evaluation gives 0.4748, 19.43
-for set 1 and 0.3777, 30.60 for set 2, which differ from the manuscript's values in the fourth digit.
-"""
-function triple_parameters(set::Int)
-    set == 1 && return ((-1.4, 0.0, 2.8), 0.4742, 19.40)
-    set == 2 && return ((-√3 / 2, 0.0, √2 / 2), 0.3771, 30.56)
-    set == 3 && return ((-1.39, 0.0, 2.4), 0.4596, 18.95)
-    set == 4 && return ((-1.39, 0.0, 2.8), 0.4744, 19.555)
-    throw(ArgumentError("set must be 1, 2, 3 or 4"))
-end
 
 """
     linecut_gpu(; set, P, Nq, directory, W, L, B_H, precision, drop, consumers, builders, queue, budget, log, cpu_workers) -> done
@@ -82,9 +58,15 @@ Files in `directory`:
 - `mu_<index>.bin`: the `P` moments of momentum number `index` (1-based, four digits) as raw
   `Float64` in the byte order of the machine. Read with `read!(name, Vector{Float64}(undef, P))`.
 
-Momenta whose file exists are skipped, so an interrupted run continues where it stopped. The
-existing files are not checked against the arguments, and `meta.txt` is rewritten at every call:
-use one folder per parameter set. Returns the number of momenta computed in this call.
+Momenta whose file exists are skipped, so an interrupted run continues where it stopped. A folder
+that holds moments is accepted only if its `meta.txt` equals that of the present call
+([`claim_directory`](@ref)); otherwise an `ArgumentError` names the parameters that differ. Note
+that `B_H` must then be passed with all its digits. Returns the number of momenta computed in
+this call.
+
+Errors. If a task fails (for example, the GPU runs out of memory, or ‖Ĥ_q‖_∞ > B_H), the error is
+written to `log`, the other tasks stop after the momentum they are working on, and the call
+throws the error. The moments written until then are kept, so the same call resumes the run.
 
 The Julia session must have several threads (`julia -t auto`); `using CUDA` must come before
 `include` of this file.
@@ -101,13 +83,13 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
     B_W, 𝔍 = spectral_bound(model, W)
     B_H = something(B_H, B_W)                          # a larger B_H (e.g. that of the reference W of choose_W) is allowed
     s = (1 - δ_s) / B_H
-    mkpath(directory)
-    open(joinpath(directory, "meta.txt"), "w") do io
+    meta = sprint() do io
         println(io, "theta ", join(θ, " ")); println(io, "W ", W); println(io, "L ", L); println(io, "P ", P)
         println(io, "Nq ", Nq); println(io, "B_H ", B_H); println(io, "J ", 𝔍); println(io, "delta_s ", δ_s); println(io, "s ", s)
         println(io, "precision ", precision); println(io, "drop_eV ", drop); println(io, "tau 8.5"); println(io, "delta 6.5"); println(io, "table I, Dirac shift E_D ", model.E_D)
         println(io, "ticks ", join(path.ticks, " ")); println(io, "arclength ", join(path.s, " "))
     end
+    claim_directory(directory, meta)                   # throws if the folder holds moments of a run with other parameters
     file(i) = joinpath(directory, @sprintf("mu_%04d.bin", i))
     pending = [i for i in eachindex(path.q) if !isfile(file(i))]
     @printf(log, "%d of %d momenta to do; B_H = %.4f eV, ε_P = %.3f meV, %d builders, %d GPU tasks\n", length(pending),
@@ -117,49 +99,79 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
     built = Channel{Tuple{Int,SparseMatrixCSC{ComplexF64,Int},Vector{Int},Int}}(queue)
     done = Threads.Atomic{Int}(0)
     report = ReentrantLock()
+    stop = Threads.Atomic{Bool}(false)                     # set by the first task that fails
+    failure = Ref{Any}(nothing)
+    # Run the loop of one task. Its first error is written to the log and stops all tasks: the
+    # others finish the momentum they are working on, and closing `built` releases the assembly
+    # tasks that wait in `put!` (their InvalidStateException is then not an error of its own).
+    guarded(work, name) = try
+        work()
+    catch err
+        lock(report) do
+            if !stop[]
+                stop[] = true
+                failure[] = CapturedException(err, catch_backtrace())
+                @printf(log, "ERROR in %s task, stopping: %s\n", name, sprint(showerror, err)); flush(log)
+            end
+        end
+        close(built)
+    end
     build = map(1:builders) do _
-        Threads.@spawn for i in todo
-            time() - start < budget || continue
-            window = Window(stack, path.q[i], W, L)
-            present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
-            H = hamiltonian(model, window)
-            drop > 0 && droptol!(H, drop)                  # entries with |h| ≤ drop (eV) are removed; ‖ΔH‖₂ ≤ largest dropped row sum
-            put!(built, (i, UnrelaxedTTG.scaled(H, s, B_H), present, length(window)))
+        Threads.@spawn guarded("an assembly") do
+            for i in todo
+                stop[] && break
+                time() - start < budget || continue
+                window = Window(stack, path.q[i], W, L)
+                present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+                H = hamiltonian(model, window)
+                drop > 0 && droptol!(H, drop)                  # entries with |h| ≤ drop (eV) are removed; ‖ΔH‖₂ ≤ largest dropped row sum
+                put!(built, (i, UnrelaxedTTG.scaled(H, s, B_H), present, length(window)))
+            end
         end
     end
     consume = map(1:consumers) do _
-        Threads.@spawn for (i, H̃, present, labels) in built
-            t = time()
-            H̃_gpu = gpu_matrix(H̃, precision)
-            μ = chebyshev_moments(H̃_gpu, present, P)
-            CUDA.unsafe_free!(H̃_gpu)
-            write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
-            Threads.atomic_add!(done, 1)
-            lock(report) do
-                @printf(log, "q %4d: %6d labels, %d zero labels, GPU %5.1f s, %7.0f s elapsed\n", i, labels,
-                    length(present) ÷ 2, time() - t, time() - start); flush(log)
+        Threads.@spawn guarded("a GPU") do
+            for (i, H̃, present, labels) in built
+                stop[] && break
+                t = time()
+                H̃_gpu = gpu_matrix(H̃, precision)
+                μ = chebyshev_moments(H̃_gpu, present, P)
+                CUDA.unsafe_free!(H̃_gpu)
+                write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
+                Threads.atomic_add!(done, 1)
+                lock(report) do
+                    @printf(log, "q %4d: %6d labels, %d zero labels, GPU %5.1f s, %7.0f s elapsed\n", i, labels,
+                        length(present) ÷ 2, time() - t, time() - start); flush(log)
+                end
             end
         end
     end
     cpu = map(1:cpu_workers) do _                          # idle CPU threads take momenta from the same list
-        Threads.@spawn for i in todo
-            time() - start < budget || continue
-            t = time()
-            window = Window(stack, path.q[i], W, L)
-            present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
-            H = hamiltonian(model, window)
-            drop > 0 && droptol!(H, drop)
-            H̃ = SparseMatrixCSC{precision,Int}(UnrelaxedTTG.scaled(H, s, B_H))
-            μ = chebyshev_moments(H̃, present, P)
-            write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
-            Threads.atomic_add!(done, 1)
-            lock(report) do
-                @printf(log, "q %4d: %6d labels, %d zero labels, CPU %5.1f s, %7.0f s elapsed\n", i, length(window),
-                    length(present) ÷ 2, time() - t, time() - start); flush(log)
+        Threads.@spawn guarded("a CPU") do
+            for i in todo
+                stop[] && break
+                time() - start < budget || continue
+                t = time()
+                window = Window(stack, path.q[i], W, L)
+                present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+                H = hamiltonian(model, window)
+                drop > 0 && droptol!(H, drop)
+                H̃ = SparseMatrixCSC{precision,Int}(UnrelaxedTTG.scaled(H, s, B_H))
+                μ = chebyshev_moments(H̃, present, P)
+                write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
+                Threads.atomic_add!(done, 1)
+                lock(report) do
+                    @printf(log, "q %4d: %6d labels, %d zero labels, CPU %5.1f s, %7.0f s elapsed\n", i, length(window),
+                        length(present) ÷ 2, time() - t, time() - start); flush(log)
+                end
             end
         end
     end
     foreach(wait, build); close(built); foreach(wait, consume); foreach(wait, cpu)
+    if failure[] !== nothing                               # the moments written so far are kept; the same call resumes
+        @printf(log, "stopped by an error after %d momenta in %.0f s; %d remain\n", done[], time() - start, length(pending) - done[]); flush(log)
+        throw(failure[])
+    end
     @printf(log, "finished %d momenta in %.0f s; %d remain\n", done[], time() - start, length(pending) - done[]); flush(log)
     return done[]
 end

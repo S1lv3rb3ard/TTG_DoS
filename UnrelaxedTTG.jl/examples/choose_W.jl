@@ -1,6 +1,6 @@
 # Choice of the window radius W for a line cut from a short GPU sweep (measured differences).
 #
-#   using CUDA; include("examples/production_linecut_gpu.jl"); include("examples/choose_W.jl")
+#   using CUDA; include("examples/choose_W.jl")
 #   result = choose_W(; set = 2, L = 45.84, P = 4000, candidates = (0.20, 0.25, 0.30), W_ref = 0.3771)
 #
 # At a few momenta of the line cut the momentum LDoS F_W(q, ·) (the average of (4.36) over the
@@ -19,7 +19,8 @@
 
 using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
 
-# `triple_parameters(set)` (θ, default W and L of the angle triples) is defined in production_linecut_gpu.jl.
+# `triple_parameters(set)` (θ, default W and L of the angle triples) is exported by UnrelaxedTTG; `linecut_gpu` is not
+# used here, so this file can be included on its own.
 
 """Relative difference (5.2): max_Σ |F − F_ref| / max_Σ |F_ref|."""
 relative_difference(F, F_ref) = maximum(abs, F .- F_ref) / maximum(abs, F_ref)

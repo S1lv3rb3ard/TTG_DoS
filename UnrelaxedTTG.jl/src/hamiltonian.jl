@@ -57,20 +57,23 @@ zero for ‖p‖₂ ≥ τ.
 end
 
 """
-    neighbours(f, model, q, x; upper = false)
+    candidates(g, model, q, x; upper = false)
 
-Call `f(y, block)` for every label y coupled to the label `x` by a nonzero
-interlayer entry of Ĥ^τ_q, where `block[α, β]` = [Ĥ^τ_q]_{(x,α),(y,β)}. With
-`upper = true` only the labels y of a layer above the layer of x are visited
+Call `g(y, b, p, G′ₐ, φ_b)` for every label y that the interlayer part of Ĥ^τ_q can couple to
+the label `x`, without evaluating the hopping. For x = (G, a) and a coupled layer b with
+spectator layer l, these are the labels y = (G′, b) with G′_l = G_l and G′_a = B_a n for the
+n ∈ ℤ² with
+
+    ‖p‖₂ < τ,      p = k_x + G′_a = q + G_b + G_l + G′_a,
+
+the momentum argument of ĥ in (3.5). `φ_b` = e^{−iG_b·τ_b} is the phase of the B sublattice of
+layer b, which does not depend on n. With `upper = true` only the layers b > a are visited
 (each coupled pair once).
 
-For x = (G, a) and a coupled layer b with spectator layer l, the coupled labels
-are y = (G′, b) with G′_l = G_l and G′_a = B_a n for the n ∈ ℤ² with
-‖p‖₂ < τ, p = k_x + B_a n, and by (3.5)
-
-    [Ĥ^τ_q]_{(x,α),(y,β)} = c_a c_b g_τ(p) e^{i(G′_a·τ_{aα} − G_b·τ_{bβ})} ĥ_{bβ}^{aα}(p).
+The n are found in the square of half-width ⌈τ/σ_min(B_a)⌉ + 1 about the rounded point
+−B_a⁻¹k_x, which contains every n with ‖B_a n + k_x‖₂ < τ.
 """
-function neighbours(f::F, model::Model{T}, q::Vec2{T}, x::Label; upper::Bool = false) where {F,T}
+function candidates(g::G, model::Model{T}, q::Vec2{T}, x::Label; upper::Bool = false) where {G,T}
     stack = model.stack
     a = x.layer
     Bₐ = stack.B[a]
@@ -87,13 +90,55 @@ function neighbours(f::F, model::Model{T}, q::Vec2{T}, x::Label; upper::Bool = f
             G′ₐ = Bₐ * n
             p = kₓ + G′ₐ
             norm(p) < model.τ || continue
-            block = interlayer_entry(model, a, b, p)
-            iszero(block) && continue                      # g_τ(p) underflows to 0 just inside ‖p‖₂ = τ
-            φₐ = cis(G′ₐ ⋅ stack.τ[a])                     # e^{iG′_a·τ_{aα}} for α = B (1 for A)
-            phases = SMatrix{2,2,Complex{T},4}(1, φₐ, φ_b, φₐ * φ_b)
             y = Label(b, setindex(setindex(x.m, n, a), zero(n), b))
-            f(y, phases .* block)
+            g(y, b, p, G′ₐ, φ_b)
         end
+    end
+    return nothing
+end
+
+"""
+    coupling(model, a, b, p, G′ₐ, φ_b) -> 2×2 SMatrix
+
+The interlayer block of (3.5) between a label x of layer `a` and the label y of layer `b`
+reached with the momentum argument `p` = k_x + G′_a:
+
+    [Ĥ^τ_q]_{(x,α),(y,β)} = c_a c_b g_τ(p) e^{i(G′_a·τ_{aα} − G_b·τ_{bβ})} ĥ_{bβ}^{aα}(p),
+
+entry (α, β), with `φ_b` = e^{−iG_b·τ_b} (τ_{jA} = 0, τ_{jB} = τ_j). It is the zero matrix where
+g_τ(p) underflows to 0, just inside ‖p‖₂ = τ.
+"""
+@inline function coupling(model::Model{T}, a::Integer, b::Integer, p::Vec2{T}, G′ₐ::Vec2{T}, φ_b::Complex{T}) where {T}
+    block = interlayer_entry(model, a, b, p)
+    iszero(block) && return block
+    φₐ = cis(G′ₐ ⋅ model.stack.τ[a])                       # e^{iG′_a·τ_{aα}} for α = B (1 for A)
+    phases = SMatrix{2,2,Complex{T},4}(1, φₐ, φ_b, φₐ * φ_b)
+    return phases .* block
+end
+
+"""
+    neighbours(f, model, q, x; upper = false)
+
+Call `f(y, block)` for every label y coupled to the label `x` by a nonzero
+interlayer entry of Ĥ^τ_q, where `block[α, β]` = [Ĥ^τ_q]_{(x,α),(y,β)}. With
+`upper = true` only the labels y of a layer above the layer of x are visited
+(each coupled pair once).
+
+For x = (G, a) and a coupled layer b with spectator layer l, the coupled labels
+are y = (G′, b) with G′_l = G_l and G′_a = B_a n for the n ∈ ℤ² with
+‖p‖₂ < τ, p = k_x + B_a n, and by (3.5)
+
+    [Ĥ^τ_q]_{(x,α),(y,β)} = c_a c_b g_τ(p) e^{i(G′_a·τ_{aα} − G_b·τ_{bβ})} ĥ_{bβ}^{aα}(p).
+
+The labels come from [`candidates`](@ref) and the blocks from [`coupling`](@ref). Every candidate
+is evaluated, whether or not y belongs to a window; [`hamiltonian`](@ref) looks y up first.
+"""
+function neighbours(f::F, model::Model{T}, q::Vec2{T}, x::Label; upper::Bool = false) where {F,T}
+    a = x.layer
+    candidates(model, q, x; upper) do y, b, p, G′ₐ, φ_b
+        block = coupling(model, a, b, p, G′ₐ, φ_b)
+        iszero(block) || f(y, block)
+        return nothing
     end
     return nothing
 end
@@ -103,10 +148,15 @@ end
 
 The truncated reciprocal Hamiltonian Ĥ_q^{(τ,W,L)} on the labels of `window`
 (q = `window.q`): the intralayer blocks h̃_t(k_x) − E_D on the diagonal and the
-interlayer entries of [`neighbours`](@ref) between labels of the window. Label
+interlayer entries (3.5) between labels of the window. Label
 s occupies rows and columns 2s − 1 (A) and 2s (B). Every interlayer block is
 computed once, from its end in the lower layer, and its conjugate transpose is
 stored at the mirrored position, so the matrix is exactly Hermitian.
+
+For each label x the labels y of [`candidates`](@ref) are looked up in the window before their
+block [`coupling`](@ref) is evaluated, so no hopping is computed for labels outside the window
+(about 60 % of the candidates at W = 0.25, L = 45.84). The entries are those of
+[`neighbours`](@ref) restricted to the window.
 """
 function hamiltonian(model::Model{T}, window::Window{T}) where {T}
     stack, q = model.stack, window.q
@@ -118,9 +168,11 @@ function hamiltonian(model::Model{T}, window::Window{T}) where {T}
         for β in 1:2, α in 1:2
             push!(I, 2s - 2 + α); push!(J, 2s - 2 + β); push!(V, h̃[α, β])
         end
-        neighbours(model, q, x; upper = true) do y, block
+        candidates(model, q, x; upper = true) do y, b, p, G′ₐ, φ_b
             s′ = get(window.index, y, 0)
-            s′ == 0 && return
+            s′ == 0 && return                              # y is not in the window: its block is not needed
+            block = coupling(model, x.layer, b, p, G′ₐ, φ_b)
+            iszero(block) && return
             for β in 1:2, α in 1:2
                 push!(I, 2s - 2 + α); push!(J, 2s′ - 2 + β); push!(V, block[α, β])
                 push!(I, 2s′ - 2 + β); push!(J, 2s - 2 + α); push!(V, conj(block[α, β]))

@@ -44,13 +44,14 @@ src/intralayer.jl       neighbour shells, Bloch matrix (2.4), Dirac energy, band
 src/interlayer.jl       hopping (F.5), Hankel table and Fourier transform (F.8)
 src/window.jl           Label, Window (direct enumeration), search_window (Theorem 4.3(b))
 src/hamiltonian.jl      Model, hamiltonian, spectral_bound
+src/parameters.jl       ANGLE_SETS, triple_parameters (angle triples with their W and L), claim_directory
 src/kpm.jl              jackson, kpm_density, chebyshev_moments (CPU), gpu_matrix (stub)
 src/dos.jl              Linecut, momentum_ldos, moire_dos, brillouin_dos
 src/posteriori.jl       a posteriori diagnostics of the truncation
 src/reference.jl        slow reference implementations used by the tests
 ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on CuSparseMatrixCSR (loaded with CUDA.jl)
 examples/               drivers, see below
-test/runtests.jl        6622 tests (CPU; the GPU extension is not covered)
+test/runtests.jl        6656 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
 ```
 
 ## Installation
@@ -62,7 +63,14 @@ using Pkg
 Pkg.activate("run")                          # any environment
 Pkg.develop(path = "path/to/UnrelaxedTTG.jl")
 Pkg.add("CUDA")                              # only for the GPU path
-Pkg.test("UnrelaxedTTG")                     # about 40 s
+Pkg.test("UnrelaxedTTG")                     # about 1 min; CPU tests only
+```
+
+`Pkg.test` runs in an environment without CUDA.jl, so it skips the GPU test set. To include it, run
+the test file in an environment that has CUDA.jl, UnrelaxedTTG and StaticArrays:
+
+```
+julia --project=run --threads=4 path/to/UnrelaxedTTG.jl/test/runtests.jl
 ```
 
 The GPU path was run with Julia 1.13.3 and CUDA.jl 6.5.1 on an NVIDIA RTX 3080 (10 GB).
@@ -108,8 +116,14 @@ Output, one folder per run:
   delta, table, ticks, arclength).
 - `mu_0001.bin`, …: the `P` moments of each momentum as raw `Float64`.
 
-A run that is stopped continues from the files that exist. Use a new folder when any parameter
-changes: existing files are not checked against the arguments.
+A run that is stopped continues from the files that exist. A folder that holds moments is accepted
+only if its `meta.txt` equals that of the present call (`claim_directory`); otherwise the call
+throws an `ArgumentError` that names the differing parameters and writes nothing. If a task fails
+(GPU out of memory, ‖Ĥ_q‖_∞ > B_H, …), the error is written to the log, the other tasks stop after
+their current momentum, and the call throws; the same call then resumes the run.
+
+The angle triples are those of `ANGLE_SETS`; `triple_parameters(set)` returns θ and the default W
+and L, and throws for an unknown `set`.
 
 The LDoS on an energy grid, for any P′ ≤ P:
 
@@ -122,7 +136,7 @@ F = kpm_density(view(μ, 1:P′), s, E) ./ 6          # s from meta.txt, at full
 
 ### Choosing W and L
 
-`examples/choose_W.jl` (include it after `production_linecut_gpu.jl`) measures, at a few momenta of
+`examples/choose_W.jl` (it can be included on its own, after `using CUDA`) measures, at a few momenta of
 the path, the relative difference (5.2) of the LDoS between candidate radii W and a reference
 W_ref, all at the same L, P, arithmetic and KPM scale, together with the difference between the
 production arithmetic and double precision with the full matrix (the floor). `choose_W` returns
@@ -130,14 +144,16 @@ the smallest W whose difference, and that of every larger candidate, is at most 
 `sweep_L` does the same comparison in L. No tolerance is prescribed.
 
 ```julia
-include("examples/choose_W.jl")
+using CUDA
+include("examples/choose_W.jl"); include("examples/production_linecut_gpu.jl")
 result = choose_W(; set = 2, L = 45.84, P = 4000, candidates = (0.20, 0.25, 0.30), W_ref = 0.3771)
 linecut_gpu(; set = 2, W = result.choice, L = 45.84, P = 4000, Nq = 60, B_H = result.B_H,
               precision = ComplexF32, drop = 1e-5, directory = "linecut_theta2")
 ```
 
 Pass `B_H` at full precision: the scale s enters the Jackson kernel, and a B_H rounded to four
-decimals changes the LDoS by several 10⁻⁶ on its own.
+decimals changes the LDoS by several 10⁻⁶ on its own. To resume a run, pass the `B_H` of its
+`meta.txt` with all digits; a rounded value is refused as another parameter.
 
 ### Measured timings and accuracy
 
@@ -153,7 +169,11 @@ RTX 3080 and i5-13600KF (20 threads), θ = (−√3/2°, 0°, √2/2°), L = 45.
 
 Relative LDoS differences (5.2) on [−0.2, 0.2] eV to double precision with the full matrix:
 2.5 × 10⁻⁷ for `ComplexF32`, 2.3–2.6 × 10⁻⁵ with `drop = 1e-5` (the threshold sets the difference).
-Assembly of one matrix with 156 000 labels takes 2.0 s on one core (16 November 2026).
+Assembly of one matrix with 156 000 labels takes 1.6 s on one core (version 0.3.0; 2.3–2.4 s for the
+same matrix with version 0.2.0, 16 November 2026).
+
+In `ComplexF32` the GPU moments of the same matrix differ between two runs by about 10⁻⁶ (measured:
+1.4 × 10⁻⁶ at P = 4000), so a recomputed momentum does not reproduce the bits of an earlier file.
 
 On 16 November 2026 the GPU moments were compared with the CPU ones on a window of 11 403 labels
 for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1.6 × 10⁻⁶ in `ComplexF32`.
@@ -190,7 +210,7 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
   ‖Ĥ_q‖_∞ ≤ B_H for each matrix before the recurrence and stops if it fails.
 - `drop > 0` and `ComplexF32` change the computed LDoS by the measured amounts above; neither is
   covered by the error estimates of the manuscript.
-- The scripts `production_linecut.jl` and `ldos_convergence.jl` know the angle sets 1–3 only (any
-  other `set` is treated as set 3); `triple_parameters` in `production_linecut_gpu.jl` has set 4.
-- If every GPU task of `linecut_gpu` fails (for example, out of GPU memory), the call does not
-  return; check the log and the GPU memory before long runs.
+- The W and L of sets 1 and 2 in `ANGLE_SETS` are the manuscript's values; (5.3)–(5.5) evaluated
+  for a = 1.42√3 Å give 0.4748, 19.43 and 0.3777, 30.60 (fourth-digit difference).
+- `claim_directory` compares `meta.txt` as text, so a folder is refused when a parameter is passed
+  with other digits than those written there, even if the difference is rounding only.
