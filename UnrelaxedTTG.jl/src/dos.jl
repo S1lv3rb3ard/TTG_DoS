@@ -1,17 +1,19 @@
 # Momentum LDoS and density of states (manuscript, Sections 4.1, 4.5, 4.6).
 
 """
-    kpm_scale(model, E; δ_s = 0.05, B_H = nothing) -> (s, B_H)
+    kpm_scale(model, E; δ_s = 0.05, B_H = nothing, kernel = Jackson()) -> (s, B_H)
 
 The KPM scale s = (1 − δ_s)/B_H of Section 4.5, with B_H from
-[`spectral_bound`](@ref) unless given, after the check |E| < B_H/(1 − δ_s) for
-the energies `E`.
+[`spectral_bound`](@ref) unless given. For the Jackson kernel, whose density (4.33) is defined
+only there, it checks |E| < B_H/(1 − δ_s) for the energies `E`; the delta-Chebyshev and Gaussian
+densities are defined for every E.
 """
-function kpm_scale(model::Model, E; δ_s::Real = 0.05, B_H::Union{Nothing,Real} = nothing)
+function kpm_scale(model::Model, E; δ_s::Real = 0.05, B_H::Union{Nothing,Real} = nothing, kernel::Kernel = Jackson())
     0 < δ_s < 1 || throw(ArgumentError("δ_s must lie in (0, 1)"))
     bound = B_H === nothing ? spectral_bound(model)[1] : float(B_H)
     s = (1 - δ_s) / bound
-    maximum(abs, E) * s < 1 || throw(DomainError(maximum(abs, E), "the energies must satisfy |E| < $(1 / s) eV"))
+    kernel isa Jackson && !(maximum(abs, E) * s < 1) &&
+        throw(DomainError(maximum(abs, E), "the energies must satisfy |E| < $(1 / s) eV"))
     return s, bound
 end
 
@@ -100,7 +102,7 @@ the zero-label orbitals present), `s`, `B_H`, `kernel`, `resolution` (ε_P for t
 """
 function momentum_ldos(model::Model{T}, q::AbstractVector, E; W, L, P::Integer, δ_s::Real = 0.05,
         B_H::Union{Nothing,Real} = nothing, kernel::Kernel = Jackson()) where {T}
-    s, bound = kpm_scale(model, E; δ_s, B_H)
+    s, bound = kpm_scale(model, E; δ_s, B_H, kernel)
     μ = zeros(length(q), P)
     ldos = zeros(length(q), length(E))
     labels, present = zeros(Int, length(q)), zeros(Int, length(q))
@@ -167,7 +169,7 @@ function moire_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::Real 
     N ≥ 1 || throw(ArgumentError("N must be a positive integer"))
     stack = model.stack
     Wⱼ, Lⱼ = triple(T, W), triple(T, L)
-    s, bound = kpm_scale(model, E; δ_s, B_H)
+    s, bound = kpm_scale(model, E; δ_s, B_H, kernel)
     ν = 1 / (6 * stack.Γ)
     grid = [SVector(n₁, n₂) for n₂ in 0:N-1 for n₁ in 0:N-1]
     groups = [(j, valley) for j in 1:3 for valley in (1, -1)]
@@ -181,7 +183,7 @@ function moire_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::Real 
         K̃ = valley == 1 ? stack.K[j] : stack.K′[j]
         M⁻¹ = inv(M)
         reach = ceil(Int, Wⱼ[j] / minimum(svdvals(Matrix(M)))) + 1
-        count, skipped, size = zeros(Int, N^2), zeros(Int, N^2), zeros(Int, N^2)
+        centre_count, skipped, window_size = zeros(Int, N^2), zeros(Int, N^2), zeros(Int, N^2)
         Threads.@threads for i in eachindex(grid)
             r = M * grid[i] / N
             window = Window(stack, K̃ + r, Wⱼ, Lⱼ)
@@ -197,11 +199,11 @@ function moire_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::Real 
             end
             H̃ = scaled(hamiltonian(model, window), s, bound)
             point_moments[g][i, :] = batched_moments(H̃, start, P, batch)
-            count[i], size[i] = length(start) ÷ 2, length(window)
+            centre_count[i], window_size[i] = length(start) ÷ 2, length(window)
         end
         w = ν * abs(det(M)) / N^2
         μ .+= w .* vec(sum(point_moments[g]; dims = 1))
-        centres[g], missing_centres[g], largest[g] = sum(count), sum(skipped), maximum(size)
+        centres[g], missing_centres[g], largest[g] = sum(centre_count), sum(skipped), maximum(window_size)
         verbose && @printf("moiré-cell DoS: layer %d, valley %+d done (%d centres, %d skipped, at most %d labels)\n",
             j, valley, centres[g], missing_centres[g], largest[g])
     end
@@ -230,7 +232,7 @@ function brillouin_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::R
         B_H::Union{Nothing,Real} = nothing, kernel::Kernel = Jackson()) where {T}
     stack = model.stack
     Wⱼ, Lⱼ = triple(T, W), triple(T, L)
-    s, bound = kpm_scale(model, E; δ_s, B_H)
+    s, bound = kpm_scale(model, E; δ_s, B_H, kernel)
     w = 1 / (6 * N^2)                                        # ν* |Γ*_j| / N²
     μ = zeros(P)
     points = zeros(Int, 3)
@@ -240,8 +242,10 @@ function brillouin_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::R
         moments = zeros(length(q), P)
         Threads.@threads for i in eachindex(q)
             window = Window(stack, q[i], Wⱼ, Lⱼ)
+            z = zero_label(window, j)
+            z > 0 || throw(ErrorException("the zero label of layer $j is not in the window at q = $(q[i])"))
             H̃ = scaled(hamiltonian(model, window), s, bound)
-            moments[i, :] = chebyshev_moments(H̃, collect(orbitals(zero_label(window, j))), P)
+            moments[i, :] = chebyshev_moments(H̃, collect(orbitals(z)), P)
         end
         μ .+= w .* vec(sum(moments; dims = 1))
         points[j] = length(q)

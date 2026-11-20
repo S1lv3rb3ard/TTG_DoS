@@ -83,20 +83,29 @@ end
 tail(ε::Real, η::Real) = 2 * sqrt(ℯ) / (π * ε) * exp(-η^2 / (2ε^2))
 
 """
-    transfer_norm(model, window, r; Σ, ε, η, nt = 201, outside = boundary(model, window)) -> (𝔟, g₀)
+    transfer_norm(model, window, r; Σ, ε, η, nt = 201, outside = boundary(model, window), layers = 1:3) -> (𝔟, g₀)
 
 The barrier transfer norm of eq. (4.19) for the core I_r = {x ∈ X : ‖ζ(x)‖₂ ≤ r}
 and the barrier B = X ∖ I_r,
 
     𝔟_q(I_r) = sup_{z ∈ Z} ‖𝔥_{OI} + 𝔥_{OB} R_z(𝖧_B) 𝔥_{BI}‖₂,
 
-sampled at `nt` points t, and the barrier gap g₀ = dist(Σ, σ(𝖧_B)).
+sampled at `nt` points t, and the barrier gap g₀ = dist(Σ, σ(𝖧_B)). The zero labels of the
+layers `layers` (those for which the bound is wanted) that are in the window must lie in I_r, as (4.22) requires;
+otherwise an `ArgumentError` is thrown.
 [`posteriori_bound`](@ref) turns 𝔟 into the bound (4.22).
 """
 function transfer_norm(model::Model{T}, window::Window{T}, r::Real; Σ, ε::Real, η::Real, nt::Integer = 201,
-        outside::Boundary{T} = boundary(model, window)) where {T}
+        outside::Boundary{T} = boundary(model, window), layers = 1:3) where {T}
     core = [norm(ζ) ≤ r for ζ in window.ζ]
     any(core) || throw(ArgumentError("the core I_r is empty"))
+    # (4.22) bounds the LDoS at a zero label only if that label lies in the core.
+    for t in layers
+        z = zero_label(window, t)
+        z > 0 || continue                                  # not in the window: no LDoS to bound there
+        core[z] || throw(ArgumentError("the zero label of layer $t lies outside the core I_r " *
+            "(‖ζ‖₂ = $(norm(window.ζ[z])) > r = $r); (4.22) needs it inside"))
+    end
     I_orbitals = [o for s in eachindex(core) if core[s] for o in orbitals(s)]
     B_orbitals = [o for s in eachindex(core) if !core[s] for o in orbitals(s)]
     H = hamiltonian(model, window)

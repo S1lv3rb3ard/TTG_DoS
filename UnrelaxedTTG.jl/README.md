@@ -34,8 +34,9 @@ G = (G_s)_{s≠t} with G_s = B_s m_s, m_s ∈ ℤ². A label has the momentum k_
 | A posteriori diagnostics | Lemma 4.4, Remark 4.5, Lemma C.4 | `flux_bound`, `transfer_norm` (dense, small windows) |
 
 The intralayer model is Jung–MacDonald (PRB 87, 195450) with the Dirac energy subtracted; the
-interlayer model is Fang–Kaxiras (PRB 93, 235153), Fourier transformed numerically (F.8), or, as an
-option, its analytic refit (see "Choice of the interlayer model").
+interlayer model is by default the analytic refit of orders (6, 7) of Fang–Kaxiras (PRB 93, 235153),
+with a closed-form Fourier transform, and as an option Fang–Kaxiras itself, Fourier transformed
+numerically (F.8) (see "Choice of the interlayer model").
 
 ## Files
 
@@ -47,7 +48,7 @@ src/intralayer.jl       neighbour shells, Bloch matrix (2.4), Dirac energy, band
 src/interlayer.jl       hopping (F.5) with the models FANG_KAXIRAS, ANALYTIC_REFIT, ANALYTIC_REFIT_6_7, Hankel table and Fourier transform (F.8)
 src/window.jl           Label, Window (direct enumeration), search_window (Theorem 4.3(b))
 src/hamiltonian.jl      Model, hamiltonian, spectral_bound
-src/parameters.jl       ANGLE_SETS, triple_parameters (angle triples with their W and L), claim_directory
+src/parameters.jl       ANGLE_SETS, triple_parameters (angle triples with their W and L), claim_directory, moments_complete, write_moments, run_jobs
 src/kpm.jl              kernels Jackson, DeltaChebyshev and Gaussian, kpm_density, truncation_bound, chebyshev_moments (CPU), gpu_matrix (stub)
 src/sell.jl             reachable (rows the recurrence can reach), SlicedELL (storage for the GPU recurrence)
 src/dos.jl              Linecut, momentum_ldos, moire_dos, brillouin_dos
@@ -55,7 +56,7 @@ src/posteriori.jl       a posteriori diagnostics of the truncation
 src/reference.jl        slow reference implementations used by the tests
 ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on the GPU: kernel on SlicedELL, and CUSPARSE (loaded with CUDA.jl)
 examples/               drivers, see below
-test/runtests.jl        7175 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
+test/runtests.jl        7342 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
 ```
 
 ## Installation
@@ -71,7 +72,8 @@ Pkg.test("UnrelaxedTTG")                     # about 1 min; CPU tests only
 ```
 
 `Pkg.test` runs in an environment without CUDA.jl, so it skips the GPU test set. To include it, run
-the test file in an environment that has CUDA.jl, UnrelaxedTTG and StaticArrays:
+the test file in an environment that has CUDA.jl, UnrelaxedTTG, StaticArrays and SpecialFunctions
+(the last two as direct dependencies, `Pkg.add(["StaticArrays", "SpecialFunctions"])`):
 
 ```
 julia --project=run --threads=4 path/to/UnrelaxedTTG.jl/test/runtests.jl
@@ -282,14 +284,17 @@ this is the path of versions 0.2.0 and 0.3.0, kept as an independent implementat
 Output, one folder per run:
 
 - `meta.txt`: `key value…` lines (theta, W, L, P, Nq, B_H, J, delta_s, s, precision, drop_eV, tau,
-  delta, table, ticks, arclength).
+  delta, table, interlayer (not for Fang–Kaxiras), varsigma (only for ς > 0), ticks, arclength).
 - `mu_0001.bin`, …: the `P` moments of each momentum as raw `Float64`.
 
-A run that is stopped continues from the files that exist. A folder that holds moments is accepted
+A run that is stopped continues from the files that exist and hold all `P` moments
+(`moments_complete`; a cut-off file is computed again). A folder that holds moments is accepted
 only if its `meta.txt` equals that of the present call (`claim_directory`); otherwise the call
 throws an `ArgumentError` that names the differing parameters and writes nothing. If a task fails
 (GPU out of memory, ‖Ĥ_q‖_∞ > B_H, …), the error is written to the log, the other tasks stop after
-their current momentum, and the call throws; the same call then resumes the run.
+their current momentum, and the call throws; the same call then resumes the run. An interrupt
+(Ctrl-C) is handled the same way: the call waits until every task has finished its momentum, so no
+task writes into the folder after the call has returned.
 
 The angle triples are those of `ANGLE_SETS`; `triple_parameters(set)` returns θ and the default W
 and L, and throws for an unknown `set`.
@@ -399,7 +404,8 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
 ## Known limitations
 
 - `spectral_bound` estimates suprema on grids, so it is not a certified bound; every driver checks
-  ‖Ĥ_q‖_∞ ≤ B_H for each matrix before the recurrence and stops if it fails.
+  ‖Ĥ_q‖_∞ ≤ B_H for each matrix before the recurrence and stops if it fails (the momenta already
+  running finish first; since 0.7.1 also in the CPU drivers).
 - `drop > 0` and `ComplexF32` change the computed LDoS by the measured amounts above; neither is
   covered by the error estimates of the manuscript.
 - The manuscript (Section 4.5 and its error estimates) is written for the Jackson kernel.

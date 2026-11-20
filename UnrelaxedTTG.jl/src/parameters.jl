@@ -73,3 +73,62 @@ function claim_directory(directory::AbstractString, meta::AbstractString)
     write(file, meta)
     return file
 end
+
+"""
+    moments_complete(file, P) -> Bool
+
+Whether `file` holds a finished set of P moments: it exists and has 8P bytes (P `Float64`). The
+drivers compute a momentum again if its file is missing, empty or cut short (for example after a
+power failure between the write and the rename of [`write_moments`](@ref)).
+"""
+moments_complete(file::AbstractString, P::Integer) = isfile(file) && filesize(file) == 8P
+
+"""
+    write_moments(file, μ) -> file
+
+Writes the moments `μ` (raw `Float64`) to a temporary file of the calling task and renames it to
+`file`, so that `file` is either absent or complete, and two tasks never write the same
+temporary file. The temporary name does not end in `.bin`, so [`claim_directory`](@ref) does not
+count it as moments.
+"""
+function write_moments(file::AbstractString, μ::AbstractVector{Float64})
+    temporary = string(file, ".tmp", getpid(), "_", string(objectid(current_task()); base = 16))
+    write(temporary, μ)
+    mv(temporary, file; force = true)
+    return file
+end
+
+"""
+    run_jobs(f, jobs; budget = Inf, start = time()) -> number of jobs done
+
+Calls `f(job)` for every element of `jobs` on the Julia threads (dynamic scheduling, as
+`Threads.@threads :dynamic`). No job is started once `budget` seconds have passed since `start`, or
+once a job has thrown: the jobs already running finish, then the first error is thrown again as a
+`CapturedException` (the job is named in the message printed to `stderr`). Used by the CPU drivers
+of `examples/`, so that one failing momentum stops the run instead of every other momentum being
+computed first.
+"""
+function run_jobs(f, jobs; budget::Real = Inf, start::Real = time())
+    done = Threads.Atomic{Int}(0)
+    stop = Threads.Atomic{Bool}(false)
+    failure = Ref{Any}(nothing)
+    failure_lock = ReentrantLock()
+    Threads.@threads :dynamic for job in collect(jobs)
+        (stop[] || time() - start ≥ budget) && continue
+        try
+            f(job)
+            Threads.atomic_add!(done, 1)
+        catch err
+            stop[] = true
+            lock(failure_lock) do
+                failure[] === nothing && (failure[] = (job, err, catch_backtrace()))
+            end
+        end
+    end
+    if failure[] !== nothing
+        job, err, backtrace = failure[]
+        println(stderr, "ERROR in job ", job, ", stopping after ", done[], " finished jobs")
+        throw(CapturedException(err, backtrace))
+    end
+    return done[]
+end

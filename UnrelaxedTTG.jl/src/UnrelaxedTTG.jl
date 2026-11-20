@@ -9,7 +9,8 @@ the W-truncation).
 Equation, lemma and section numbers refer to the manuscript "Momentum-space
 algorithm for the electronic structure of double-incommensurate twisted
 trilayer graphene" in the version of 11 November 2026
-(`manuscript_EST_iop_2026-11-11`).
+(`manuscript_EST_iop_2026-11-11`), which uses the Fang–Kaxiras interlayer model; the numbers of
+the formulas are the same for the default refit model, only the radial functions V₃, V₆ differ.
 
 Units: lengths in Å, momenta in Å⁻¹, energies in eV, angles in degrees
 (counterclockwise). Conventions, as in `RelaxedTTG.jl`: lattice bases A_j with
@@ -38,9 +39,11 @@ recurrence of Section 4.5 runs on the device; the windows and the assembly stay 
     μ      = chebyshev_moments(gpu_matrix(S), c, 2000)
     F      = kpm_density(μ, s, range(-0.2, 0.2; length = 401)) ./ 6      # momentum LDoS (4.36)
 
-The interlayer hopping is that of Fang & Kaxiras (the manuscript) unless another model is chosen;
-the analytic refit of its threefold and sixfold terms, whose Fourier transform decays like a
-Gaussian, is `Model(stack; τ = 8.5, δ = 6.5, interlayer = :analytic_refit)`.
+The interlayer hopping is, by default (`DEFAULT_INTERLAYER`, since version 0.6.0), the analytic
+refit of orders (6, 7) of the Fang–Kaxiras threefold and sixfold terms, whose Fourier transform
+decays like a Gaussian (the model adopted for the manuscript on 20 November 2026). Fang–Kaxiras
+itself is `Model(stack; τ = 8.5, δ = 6.5, interlayer = :fang_kaxiras)`, the coarser refit of
+orders (2, 3) `interlayer = :analytic_refit`.
 
 The same moments can be evaluated with the high-order delta-Chebyshev kernel of arXiv:2512.03149
 or with a Gaussian instead of the Jackson kernel (keyword `kernel` of `kpm_density`, `momentum_ldos`, `moire_dos`,
@@ -94,7 +97,7 @@ export InterlayerModel, InterlayerParameters, FANG_KAXIRAS, AnalyticRefit, ANALY
 export interlayer_hopping, closed_form_hankel, HankelTable, hankel, fourier_hopping
 export Label, Window, zero_label, shifted_momentum, momentum, dimension, orbitals, search_window
 export Model, hamiltonian, interlayer_entry, neighbours, interlayer_row_sum, spectral_bound, restrict
-export ANGLE_SETS, triple_parameters, claim_directory
+export ANGLE_SETS, triple_parameters, claim_directory, moments_complete, write_moments, run_jobs
 export reference_hamiltonian, reference_fourier_hopping, reference_bloch, gaussian_density, reference_moments
 export jackson, kpm_density, kpm_density!, chebyshev_moments, kpm_resolution, gpu_matrix
 export Jackson, DeltaChebyshev, Gaussian, truncation_bound

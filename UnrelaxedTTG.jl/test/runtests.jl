@@ -1,12 +1,13 @@
 using UnrelaxedTTG
-using LinearAlgebra, Random, SparseArrays, StaticArrays, Test
+using LinearAlgebra, Printf, Random, SparseArrays, StaticArrays, Test
 using SpecialFunctions: besselix
 
 const U = UnrelaxedTTG
 
 # The GPU test set at the end runs only if CUDA.jl is in the active environment and a device is
 # usable. CUDA.jl is not a test dependency, so `Pkg.test` skips it; to run it, start this file in
-# an environment that has UnrelaxedTTG, CUDA and StaticArrays.
+# an environment that has UnrelaxedTTG, CUDA, StaticArrays and SpecialFunctions (the last two as
+# direct dependencies).
 const HAS_CUDA = Base.find_package("CUDA") !== nothing
 HAS_CUDA && @eval using CUDA
 
@@ -77,6 +78,13 @@ end
     @test dirac_energy(Shells(1.42 * √3; table = :I)) ≈ 0.00274 atol = 1e-12
     @test dirac_energy(Shells(1.42 * √3; table = :II)) ≈ 0.00317 atol = 1e-12
     @test model.E_D ≈ 0.00274 atol = 1e-12
+    # Float32: the same shells (rounding moves equal distances apart by ~1e-6 a; before 0.7.1 the
+    # shells were split and E_D came out as 1.20 meV)
+    S₆₄, S₃₂ = Shells(1.42 * √3), Shells(Float32(1.42 * √3))
+    @test length(S₃₂.dA) == length(S₆₄.dA) && length(S₃₂.dB) == length(S₆₄.dB)
+    @test length(S₃₂.rA) == length(S₆₄.rA) && length(S₃₂.rB) == length(S₆₄.rB)
+    @test maximum(abs, S₃₂.dA - S₆₄.dA) < 1e-5 && maximum(abs, S₃₂.dB - S₆₄.dB) < 1e-5
+    @test dirac_energy(S₃₂) ≈ dirac_energy(S₆₄) rtol = 1e-3
     for t in 1:3
         @test norm(bloch(model.shells, stack, t, stack.K[t]; E_D = model.E_D)) < 1e-13        # Dirac point
         @test norm(bloch(model.shells, stack, t, stack.K′[t]; E_D = model.E_D)) < 1e-13
@@ -300,6 +308,9 @@ end
     @test length(far) > 0                                                 # the windows are still built
     @test_throws ArgumentError Window(stack, q, 0.9, 5.0)
     @test_throws ArgumentError Window(stack, q, 0.3, Inf)
+    # two layers with the same lattice: not incommensurate, refused for either pair (m5)
+    @test_throws ArgumentError Window(Stack(1.42 * √3, (0.0, 0.0, 1.4)), stack.K[2], 0.2, 5.0)
+    @test_throws ArgumentError Window(Stack(1.42 * √3, (-1.4, 0.0, 0.0)), stack.K[2], 0.2, 5.0)
     # Theorem 4.3(b): for W in the connectedness range the breadth-first search returns the window
     for t in 1:3, shift in (SVector(0.0, 0.0), SVector(0.03, 0.05), SVector(-0.1, 0.02))
         lower, upper = connectedness_range(stack, t)
@@ -458,6 +469,10 @@ end
     ε = kpm_resolution(s, P)
     @test norm(kpm_density(μ, s, E) - gaussian_density(A, 7, E, ε)) < 0.1 * norm(gaussian_density(A, 7, E, ε))
     @test_throws DomainError kpm_density(μ, s, [1.01 / s])
+    @test_throws DomainError kpm_density(μ, s, [NaN])
+    @test_throws DomainError kpm_density(μ, s, [NaN]; kernel = Gaussian(0.1 / s))
+    @test_throws ArgumentError kpm_density(Float64[], s, [0.0]; kernel = Gaussian(0.1 / s))
+    @test_throws ArgumentError kpm_density(Float64[], s, [0.0]; kernel = DeltaChebyshev(0.1 / s, 2))
     @test_throws ErrorException U.scaled(sparse(Matrix(A)), s, 0.1)
 end
 
@@ -677,6 +692,11 @@ end
     @test all(iszero, gauss.ldos[2, :])
     exact = sum(o -> gaussian_density(H, o, E, G.ε), start) / 6
     @test maximum(abs, gauss.ldos[1, :] - exact) ≤ maximum(truncation_bound(G, result.s, E, P)) + 1e-9
+    # energies with |sE| ≥ 1: refused for Jackson, allowed for the other kernels (their densities are defined there)
+    beyond = [0.0, 1.2 / result.s]
+    @test_throws DomainError momentum_ldos(model, q[1:1], beyond; W, L, P = 16)
+    @test momentum_ldos(model, q[1:1], beyond; W, L, P = 16, kernel = G).ldos[1, 2] ≈ 0 atol = 1e-12
+    @test isfinite(momentum_ldos(model, q[1:1], beyond; W, L, P = 16, kernel = K).ldos[1, 2])
     path = linecut(stack, 4)
     @test length(path.q) == 21 && path.q[1] ≈ stack.K[1] && path.q[end] ≈ stack.K[3]
     @test path.q[5] ≈ stack.K[2] && path.q[17] ≈ stack.K[2]
@@ -759,8 +779,12 @@ end
         Δ = inv(z * I - Matrix(H_full))[o_full, o_full] - inv(z * I - Matrix(H_X))[o_X, o_X]
         @test abs(Δ) ≤ flux * (1 + 1e-9)
     end
-    𝔟, g₀ = transfer_norm(model, window, 0.05; Σ, ε, η, outside)
+    𝔟, g₀ = transfer_norm(model, window, 0.05; Σ, ε, η, outside, layers = 2)
     @test 𝔟 > 0 && g₀ ≥ 0
+    # (4.22) needs the zero labels in the core: at r = 0.05 the zero label of layer 3 lies outside
+    @test norm(window.ζ[zero_label(window, 3)]) > 0.05
+    @test_throws ArgumentError transfer_norm(model, window, 0.05; Σ, ε, η, outside)
+    @test_throws ArgumentError transfer_norm(model, window, 0.05; Σ, ε, η, outside, layers = 3)
     o_X, o_full = orbitals(zero_label(window, 2))[1], orbitals(zero_label(full, 2))[1]
     difference = maximum(abs, gaussian_density(H_full, o_full, E, ε) - gaussian_density(H_X, o_X, E, ε))
     @test difference ≤ posteriori_bound(𝔟, ε, η)                    # eq. (4.22)
@@ -805,6 +829,73 @@ end
         rm(joinpath(folder, "meta.txt"))
         @test_throws ArgumentError claim_directory(folder, other)
     end
+end
+
+@testset "driver helpers: moment files, run_jobs, command-line arguments (examples/)" begin
+    mktempdir() do directory
+        file = joinpath(directory, "mu_0001.bin")
+        @test !moments_complete(file, 4)
+        μ = [1.0, 0.5, -0.25, 0.125]
+        @test write_moments(file, μ) == file
+        @test moments_complete(file, 4) && !moments_complete(file, 5)
+        @test read!(file, zeros(4)) == μ
+        @test readdir(directory) == ["mu_0001.bin"]                       # no temporary file is left
+        write(file, μ[1:2])                                               # cut short, e.g. by a power failure
+        @test !moments_complete(file, 4)
+        write(file, UInt8[])                                              # empty
+        @test !moments_complete(file, 4)
+        # claim_directory: the refusal names the keys that differ, or the order
+        folder = joinpath(directory, "run")
+        claim_directory(folder, "a 1\nb 2\n")
+        write_moments(joinpath(folder, "mu_0001.bin"), μ)
+        refusal = try claim_directory(folder, "b 2\na 1\n"); nothing catch e; e end
+        @test refusal isa ArgumentError && occursin("another order", refusal.msg)
+        refusal = try claim_directory(folder, "a 1\nb 2\nc 3\n"); nothing catch e; e end
+        @test refusal isa ArgumentError && occursin("c", refusal.msg)
+    end
+    # run_jobs: all jobs, the time budget, and the stop at the first error
+    seen = Threads.Atomic{Int}(0)
+    @test run_jobs(_ -> Threads.atomic_add!(seen, 1), 1:20) == 20 && seen[] == 20
+    @test run_jobs(_ -> error("never called"), 1:5; budget = 0) == 0
+    @test run_jobs(_ -> nothing, Int[]) == 0
+    started = Threads.Atomic{Int}(0)
+    failure = try
+        redirect_stderr(devnull) do
+            run_jobs(1:200) do i
+                Threads.atomic_add!(started, 1)
+                i == 1 && error("job 1 fails")
+                sleep(0.01)
+            end
+        end
+        nothing
+    catch e
+        e
+    end
+    @test failure isa CapturedException && occursin("job 1 fails", sprint(showerror, failure))
+    @test started[] < 200                                               # later jobs were not started
+    # command-line arguments and meta lines of the drivers
+    include(joinpath(@__DIR__, "..", "examples", "kernel_argument.jl"))
+    arguments = ["8000", "eta=0.02", "20", "m=4"]
+    K = Base.invokelatest(kernel_argument!, arguments)
+    @test K isa DeltaChebyshev && K.η == 0.02 && length(K.z) == 4 && arguments == ["8000", "20"]
+    @test Base.invokelatest(kernel_argument!, ["1"]) isa Jackson
+    @test Base.invokelatest(kernel_argument!, ["gauss=0.01"]) == Gaussian(0.01)
+    @test_throws ArgumentError Base.invokelatest(kernel_argument!, ["m=4"])
+    @test_throws ArgumentError Base.invokelatest(kernel_argument!, ["eta=0.02", "gauss=0.01"])
+    arguments = ["2", "interlayer=fang_kaxiras", "x"]
+    @test Base.invokelatest(interlayer_argument!, arguments) === :fang_kaxiras && arguments == ["2", "x"]
+    @test Base.invokelatest(interlayer_argument!, ["2"]) === DEFAULT_INTERLAYER
+    @test_throws Exception Base.invokelatest(interlayer_argument!, ["interlayer=unknown"])
+    meta(name) = sprint(io -> Base.invokelatest(interlayer_meta, io, name))
+    @test meta(:fang_kaxiras) == "" && meta(FANG_KAXIRAS) == ""         # a Fang–Kaxiras meta.txt has no interlayer line
+    @test meta(:analytic_refit_6_7) == "interlayer analytic_refit_6_7\n" == meta(ANALYTIC_REFIT_6_7)
+    # the CPU recurrence in single precision (the cpu_workers path of linecut_gpu)
+    window = Window(stack, stack.K[2] + SVector(0.01, 0.02), 0.25, 6.0)
+    B_H, _ = spectral_bound(model, 0.25)
+    H̃ = U.scaled(hamiltonian(model, window), 0.95 / B_H, B_H)
+    c = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+    @test chebyshev_moments(SparseMatrixCSC{ComplexF32,Int}(H̃), c, 200) ≈ chebyshev_moments(H̃, c, 200) atol = 2e-5
+    @test_throws ArgumentError U.scaled(hamiltonian(model, window), 1.1 / B_H, B_H)          # s B_H > 1
 end
 
 @testset "reachable rows and sliced ELLPACK storage (src/sell.jl)" begin
@@ -893,6 +984,43 @@ end
         end
         D = blockdiag(sparse(ComplexF64[0.1 0.2; 0.2 0.1]), sparse(ComplexF64[0.3;;]))
         @test_throws ArgumentError chebyshev_moments(gpu_matrix(SlicedELL(D; reach = [1])), [3], 4)   # row 3 is not stored
+        # a launch with more start orbitals than the kernel's blocks allow is refused, not attempted
+        many = [o for s in 1:12 for o in orbitals(s)]
+        @test_throws ArgumentError chebyshev_moments(gpu_matrix(SlicedELL(H̃)), many, 4)
+        # the drivers: a tiny line cut (6 momenta) with resume, refusals and the stop at an error
+        include(joinpath(@__DIR__, "..", "examples", "production_linecut_gpu.jl"))
+        include(joinpath(@__DIR__, "..", "examples", "choose_W.jl"))
+        run(; kwargs...) = Base.invokelatest(linecut_gpu; set = 1, P = 64, Nq = 1, W = 0.25, L = 6.0,
+                                             consumers = 1, builders = 1, log = devnull, kwargs...)
+        mktempdir() do directory
+            folder = joinpath(directory, "cut")
+            @test run(; directory = folder) == 6
+            files = filter(name -> startswith(name, "mu_"), readdir(folder))
+            @test files == [@sprintf("mu_%04d.bin", i) for i in 1:6]
+            @test all(name -> filesize(joinpath(folder, name)) == 8 * 64, files)
+            μ₃ = read!(joinpath(folder, "mu_0003.bin"), zeros(64))
+            @test run(; directory = folder) == 0                          # resume: nothing left to do
+            write(joinpath(folder, "mu_0003.bin"), μ₃[1:10])              # a file cut short is computed again
+            @test run(; directory = folder) == 1
+            @test read!(joinpath(folder, "mu_0003.bin"), zeros(64)) ≈ μ₃ atol = 1e-12
+            @test_throws ArgumentError run(; directory = folder, P = 128)  # other parameters: refused
+            @test_throws ArgumentError run(; directory = folder, consumers = 0)
+            # ‖Ĥ_q‖_∞ > B_H: the first error stops the run and is thrown; no temporary file is left
+            other = joinpath(directory, "small_B_H")
+            @test_throws Exception run(; directory = other, B_H = 0.5)
+            @test !any(name -> occursin(".tmp", name), readdir(other))
+            # choose_W writes into a claimed folder and refuses one with other parameters
+            sweep = joinpath(directory, "sweep")
+            result = Base.invokelatest(choose_W; set = 1, L = 6.0, P = 64, candidates = (0.2,), W_ref = 0.25, Nq = 1,
+                                       momenta = 1:2:5, E = range(-0.2, 0.2; length = 41), log = devnull, directory = sweep)
+            @test result.choice == (maximum(result.difference) ≤ result.floor ? 0.2 : 0.25)   # the selection rule
+            @test isfile(joinpath(sweep, "mu_W0.200000_q0001.bin")) && isfile(joinpath(sweep, "mu_W0.250000_q0005.bin"))
+            @test occursin("chosen_W", read(joinpath(sweep, "result.txt"), String))
+            @test_throws ArgumentError Base.invokelatest(choose_W; set = 1, L = 7.0, P = 64, candidates = (0.2,), W_ref = 0.25,
+                                       Nq = 1, momenta = 1:2:5, log = devnull, directory = sweep)
+            @test_throws ArgumentError Base.invokelatest(choose_W; set = 1, L = 6.0, P = 64, candidates = (0.2,), W_ref = 0.25,
+                                       Nq = 1, momenta = 1:2:5, log = devnull, directory = folder)          # a line-cut folder
+        end
     else
         @info "GPU test set skipped: CUDA.jl is not in the environment, or no device is usable"
     end

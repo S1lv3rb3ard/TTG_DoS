@@ -10,26 +10,28 @@
 # (default 6) of arXiv:2512.03149, with `gauss=<ε>` (eV) with the Gaussian δ_ε expanded in Chebyshev
 # polynomials, instead of the Jackson kernel (`kernel_argument.jl`).
 #
-# With the fourth argument `legacy` the path uses the older Γ points of
+# With the argument `legacy` (anywhere; the positional arguments before it may be left out) the path uses the older Γ points of
 # `getLinecut(K, Nq, 'legacy')` and the intralayer model is that of TTG_DoS
-# (Jung–MacDonald Table II, no Dirac shift).
+# (Jung–MacDonald Table II, no Dirac shift); its interlayer model is then Fang–Kaxiras unless
+# `interlayer=<name>` is given.
 #
 # Plot the LDoS against the arc length s (first column), not against the point index: the
 # segments have different lengths.
 #
-# Writes a text file: one header line, then one line per momentum with the arc
+# Writes a text file: three header lines (energies; ticks; model, W, L, P and kernel), then one line per momentum with the arc
 # length s (Å⁻¹) followed by the LDoS at every energy (1/eV).
 
 using UnrelaxedTTG, Printf
 include(joinpath(@__DIR__, "kernel_argument.jl"))
 
 kernel = kernel_argument!(ARGS)
-interlayer = interlayer_argument!(ARGS; default = "legacy" in ARGS ? :fang_kaxiras : DEFAULT_INTERLAYER)   # legacy: the MATLAB model
+legacy = "legacy" in ARGS                                  # decided once, wherever the word stands
+filter!(!=("legacy"), ARGS)
+interlayer = interlayer_argument!(ARGS; default = legacy ? :fang_kaxiras : DEFAULT_INTERLAYER)   # legacy: the MATLAB model
+length(ARGS) ≤ 3 || throw(ArgumentError("unexpected arguments $(ARGS[4:end]); see the usage line at the top of this file"))
 P = length(ARGS) ≥ 1 ? parse(Int, ARGS[1]) : 8000
 Nq = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 20
 output = length(ARGS) ≥ 3 ? ARGS[3] : "ldos_linecut.txt"
-
-legacy = length(ARGS) ≥ 4 && ARGS[4] == "legacy"
 
 stack = Stack(1.42 * √3, (-1.4, 0.0, 2.8))
 model = legacy ? Model(stack; τ = 8.5, δ = 6.5, table = :II, shift = false, interlayer) : Model(stack; τ = 8.5, δ = 6.5, interlayer)
@@ -47,6 +49,8 @@ kernel isa Jackson || @printf("terms beyond P = %d: at most %.1e per eV (truncat
 open(output, "w") do io
     println(io, "# E (eV): ", join(E, " "))
     println(io, "# ticks: ", join(path.ticks, " "), " labels: ", join(path.labels, " "))
+    println(io, "# model: theta ", join(stack.θ, " "), legacy ? " table II, no Dirac shift, legacy path" : " table I, Dirac shift",
+        ", interlayer ", interlayer, "; W ", W, " L ", L, " P ", P, " B_H ", B_H, " s ", result.s, "; ", kernel_text(kernel, result.s, P))
     for i in eachindex(path.q)
         println(io, path.s[i], " ", join(view(result.ldos, i, :), " "))
     end

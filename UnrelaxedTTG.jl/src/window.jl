@@ -138,7 +138,9 @@ function enumerate_window!(labels::Vector{Label}, stack::Stack{T}, t::Integer, c
     B = stack.B
     C, D = B[k] - B[t], B[l] - B[t]
     σ_D = minimum(svdvals(Matrix(D)))
+    σ_C = minimum(svdvals(Matrix(C)))
     σ_D > 0 || throw(ArgumentError("layers $t and $l have the same lattice; the stack is not incommensurate"))
+    σ_C > 0 || throw(ArgumentError("layers $t and $k have the same lattice; the stack is not incommensurate"))
     xmax = ceil(Int, L / stack.σ)
     ymax = ceil(Int, W / σ_D) + 1
     D⁻¹ = inv(D)

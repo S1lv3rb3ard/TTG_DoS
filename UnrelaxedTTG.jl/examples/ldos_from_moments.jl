@@ -7,7 +7,7 @@
 # with `gauss=<ε>` (eV) with the Gaussian δ_ε expanded in Chebyshev polynomials; the header then also gives the largest value over the energies of `truncation_bound` (1/eV, for the
 # LDoS, i.e. for μ₀/6 = 1), the bound for the terms beyond P′ that are left out.
 #
-# Output: header lines, then one line per finished momentum: index, arc length, LDoS at every energy (1/eV).
+# Output: header lines (energies; ticks, P′ and kernel; the run parameters of meta.txt), then one line per finished momentum: index, arc length, LDoS at every energy (1/eV).
 
 using UnrelaxedTTG, Printf
 include(joinpath(@__DIR__, "kernel_argument.jl"))
@@ -17,6 +17,7 @@ directory, output = ARGS[1], ARGS[2]
 meta = Dict(split(line, ' '; limit = 2)[1] => split(line, ' '; limit = 2)[2] for line in eachline(joinpath(directory, "meta.txt")))
 P = parse(Int, meta["P"]); s = parse(Float64, meta["s"])
 P′ = length(ARGS) ≥ 3 ? parse(Int, ARGS[3]) : P
+1 ≤ P′ ≤ P || throw(ArgumentError("P′ = $P′ must lie in 1, …, P = $P (the number of stored moments)"))
 Emax = length(ARGS) ≥ 4 ? parse(Float64, ARGS[4]) : 0.25
 E = range(-Emax, Emax; length = length(ARGS) ≥ 5 ? parse(Int, ARGS[5]) : 1001)
 arclength = parse.(Float64, split(meta["arclength"]))
@@ -25,9 +26,11 @@ open(output, "w") do io
     println(io, "# ticks: ", meta["ticks"], " P ", P′, " resolution_eV ", kpm_resolution(s, P′, kernel),
         kernel isa DeltaChebyshev ? " kernel delta-Chebyshev m $(length(kernel.z)) truncation_bound_per_eV $(maximum(truncation_bound(kernel, s, E, P′)))" :
         kernel isa Gaussian ? " kernel Gaussian truncation_bound_per_eV $(maximum(truncation_bound(kernel, s, E, P′)))" : "")
+    println(io, "# run: ", join(("$k $(meta[k])" for k in ("theta", "W", "L", "B_H", "s", "interlayer", "precision", "drop_eV") if haskey(meta, k)), "; "),
+        haskey(meta, "interlayer") ? "" : "; interlayer fang_kaxiras (no interlayer line in meta.txt)")
     for i in eachindex(arclength)
         name = joinpath(directory, @sprintf("mu_%04d.bin", i))
-        isfile(name) || continue
+        moments_complete(name, P) || continue                 # missing, or cut off by an interruption
         μ = Vector{Float64}(undef, P); read!(name, μ)
         println(io, i, " ", arclength[i], " ", join(kpm_density(view(μ, 1:P′), s, E; kernel) ./ 6, " "))
     end

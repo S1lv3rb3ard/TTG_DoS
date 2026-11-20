@@ -4,9 +4,11 @@
 #   compare_models(; set = 2, W = 0.3771, L = 45.84)                 # transforms and Hamiltonians (CPU)
 #   compare_linecuts(dir_FK, dir_R; output = "ldos_difference.txt")  # two line cuts of linecut_gpu
 #
-# For `compare_linecuts`, run `linecut_gpu` twice with the same set, W, L, P, Nq, precision and drop,
-# the second time with `interlayer = :analytic_refit` and `B_H` set to the B_H of the first run (from
-# its meta.txt, all digits), so that both runs have the same scale s and resolution ε_P.
+# For `compare_linecuts`, run `linecut_gpu` twice with the same set, W, L, P, Nq, precision and drop:
+# first with `interlayer = :fang_kaxiras` (the default is the refit of orders (6, 7) since version
+# 0.6.0), then with the refit (the default, or `interlayer = :analytic_refit` for orders (2, 3)) and
+# `B_H` set to the B_H of the first run (from its meta.txt, all digits), so that both runs have the
+# same scale s and resolution ε_P. Folders of `production_linecut.jl` (CPU) work too.
 
 using UnrelaxedTTG, LinearAlgebra, Printf, SparseArrays
 
@@ -30,9 +32,9 @@ function operator_norm(D; iterations::Int = 300)
 end
 
 """
-    compare_models(; set, W, L, momenta = 1:60:301, Nq = 60, log = stdout, refit = ANALYTIC_REFIT, ς = 0) -> named tuple
+    compare_models(; set, W, L, momenta = 1:60:301, Nq = 60, log = stdout, refit = ANALYTIC_REFIT_6_7, ς = 0) -> named tuple
 
-The second model is `refit` with the Gaussian regularization (2.13) of length `ς` (e.g. `refit = FANG_KAXIRAS, ς = 0.01`
+The second model is `refit` (default: the default model, the refit of orders (6, 7)) with the Gaussian regularization (2.13) of length `ς` (e.g. `refit = FANG_KAXIRAS, ς = 0.01`
 for the regularized Fang–Kaxiras model; the transforms below do not include the factor e^{−ς²ρ²/2}).
 For the angle triple `set`: the Hankel transforms ℋ₃, ℋ₆ of Fang–Kaxiras and of `refit` on [0, τ] (largest
 difference), the coupling Γ*ĥ(K₁) between layers 1 and 2, and at the momenta `momenta` of the line
@@ -40,7 +42,7 @@ cut (Nq steps per segment) the operator norm of Ĥ_q(refit) − Ĥ_q(Fang–Kaxi
 (W, L), with the operator norm of the interlayer part of Ĥ_q(Fang–Kaxiras) for scale.
 """
 function compare_models(; set::Int, W::Real, L::Real, momenta = 1:60:301, Nq::Int = 60, log::IO = stdout,
-                        refit::InterlayerModel = ANALYTIC_REFIT, ς::Real = 0)
+                        refit::InterlayerModel = ANALYTIC_REFIT_6_7, ς::Real = 0)
     θ = triple_parameters(set)[1]
     stack = Stack(1.42 * √3, θ)
     FK = Model(stack; τ = 8.5, δ = 6.5, parameters = FANG_KAXIRAS)
@@ -97,7 +99,9 @@ function compare_linecuts(dir_FK::AbstractString, dir_R::AbstractString; E = ran
     get(m_R, "interlayer", "fang_kaxiras") == "fang_kaxiras" && !haskey(m_R, "varsigma") &&
         throw(ArgumentError("$dir_R is a run of the unregularized Fang–Kaxiras model"))
     for key in ("theta", "W", "L", "P", "Nq", "B_H", "s", "precision", "drop_eV", "tau", "delta")
-        m_FK[key] == m_R[key] || throw(ArgumentError("the runs differ in $key: $(m_FK[key]) and $(m_R[key])"))
+        # precision and drop_eV are absent from the meta.txt of the CPU driver production_linecut.jl
+        get(m_FK, key, nothing) == get(m_R, key, nothing) ||
+            throw(ArgumentError("the runs differ in $key: $(get(m_FK, key, "(none)")) and $(get(m_R, key, "(none)"))"))
     end
     P = parse(Int, m_FK["P"]); s = parse(Float64, m_FK["s"])
     arclength = parse.(Float64, split(m_FK["arclength"]))
@@ -107,7 +111,7 @@ function compare_linecuts(dir_FK::AbstractString, dir_R::AbstractString; E = ran
     μ = Vector{Float64}(undef, P)
     for i in 1:n
         a, b = (joinpath(d, @sprintf("mu_%04d.bin", i)) for d in (dir_FK, dir_R))
-        isfile(a) && isfile(b) || continue
+        moments_complete(a, P) && moments_complete(b, P) || continue
         read!(a, μ); F_FK[i, :] = kpm_density(μ, s, E) ./ 6
         read!(b, μ); F_R[i, :] = kpm_density(μ, s, E) ./ 6
         absolute[i] = maximum(abs, F_R[i, :] .- F_FK[i, :])

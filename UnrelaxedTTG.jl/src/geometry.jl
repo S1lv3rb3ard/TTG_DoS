@@ -59,9 +59,6 @@ function Stack(a::Real, θ)
         τ, map(normalize, τ), map(Rⱼ -> Rⱼ * K₀, R), map(Rⱼ -> Rⱼ * K′₀, R), abs(det(B₀)), norm(K₀), minimum(svdvals(Matrix(B₀))))
 end
 
-"""Pairs of coupled layers (j, k) with j < k."""
-const INTERFACES = ((1, 2), (2, 3))
-
 """The layers coupled to layer `j`."""
 coupled(j::Integer) = j == 2 ? (1, 3) : (2,)
 
@@ -113,9 +110,10 @@ The interval of Theorem 4.3 for the window radius of layer `j`:
 
     β_{j,min} + (√3/2) β_{j,max} < W_j ≤ min(½‖K‖₂, (√3/2)(‖K‖₂ − β_{j,max}))
 
-(conditions (4.12)–(4.14); the first upper bound is strict). For W_j in this
-interval the window of layer j is connected by adjacent labels and is returned
-by [`search_window`](@ref).
+(conditions (4.12)–(4.14); the first upper bound is strict). Theorem 4.3 also assumes that the
+momentum lies in the window, ‖q − K̃‖₂ < W, and that the window is not cut by L (L = ∞). Under
+these hypotheses, for W_j in this interval the window of layer j is connected by adjacent labels and
+is returned by [`search_window`](@ref). The function checks none of them; it returns the interval.
 """
 function connectedness_range(stack::Stack, j::Integer)
     k, l = others(j)

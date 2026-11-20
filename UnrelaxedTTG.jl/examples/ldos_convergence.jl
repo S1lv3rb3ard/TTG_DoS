@@ -8,7 +8,7 @@
 # At ten momenta of the path (its vertices and the midpoints of its segments) the moments of the
 # zero-label orbitals are computed for several (W, L), all with the same KPM scale s and the same P,
 # so that differences are truncation errors only. Files: <directory>/mu_<config>_<point>.bin.
-# Finished files are skipped. The last configuration is the reference.
+# Finished files are skipped; the run stops at the first job that fails. The last configuration is the reference.
 
 using UnrelaxedTTG, Printf, LinearAlgebra
 include(joinpath(@__DIR__, "kernel_argument.jl"))         # interlayer_argument!, interlayer_meta
@@ -48,19 +48,18 @@ file(c, i) = joinpath(directory, @sprintf("mu_%d_%02d.bin", c, i))
 # the reference (last) configuration is computed at the five vertices of the path only
 vertices = (1, 3, 5, 7, 10)
 jobs = [(c, i) for c in eachindex(configurations) for i in eachindex(points)
-        if !isfile(file(c, i)) && (c < length(configurations) || i in vertices)]
+        if !moments_complete(file(c, i), P) && (c < length(configurations) || i in vertices)]
 sort!(jobs; by = job -> -first(configurations[job[1]])^2 * last(configurations[job[1]])^2)      # largest first
 @printf("%d jobs; P = %d, B_H = %.4f eV, ε_P = %.3f meV\n", length(jobs), P, B_H, 1e3 * kpm_resolution(s, P))
 start = time()
-Threads.@threads :dynamic for (c, i) in jobs
-    time() - start < budget || continue
+run_jobs(jobs; budget, start) do (c, i)                  # stops at the first failing job
     W, L = configurations[c]
     window = Window(stack, points[i], W, L)
     present = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
     length(present) == 6 || error("a zero label is missing at point $i for W = $W")
     H̃ = UnrelaxedTTG.scaled(hamiltonian(model, window), s, B_H)
     μ = chebyshev_moments(H̃, present, P)                  # summed over the six zero-label orbitals
-    write(file(c, i) * ".tmp", μ); mv(file(c, i) * ".tmp", file(c, i); force = true)
+    write_moments(file(c, i), μ)
     @printf("W = %.4f, L = %.2f, point %2d: %6d labels, %6.0f s elapsed\n", W, L, i, length(window), time() - start)
     flush(stdout)
 end

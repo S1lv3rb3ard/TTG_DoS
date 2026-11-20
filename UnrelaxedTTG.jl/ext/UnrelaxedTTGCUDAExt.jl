@@ -181,6 +181,11 @@ function moments(H̃::SlicedELL{T}, ::Val{C}, start::Vector{Int}, P::Integer) wh
         R = real(T)
         matrix = (H̃.offset, H̃.width, H̃.val, H̃.col)
         kernel = @cuda launch = false step!(current, previous, matrix..., sums, 1, R(1), R(0))
+        # The tree sum needs blocks of exactly THREADS threads. C = 6 start columns in ComplexF64 use
+        # 64 registers per thread, the most that allows 1024 threads; more columns would fail at launch.
+        CUDA.maxthreads(kernel) ≥ THREADS || throw(ArgumentError("$C start orbitals of type $T need " *
+            "$(CUDA.registers(kernel)) registers per thread, too many for blocks of $THREADS threads; pass at most 6 orbitals " *
+            "per call (the zero labels) and sum the moments of several calls"))
         kernel(current, previous, matrix..., sums, 1, R(1), R(0); threads = THREADS, blocks)      # t₁ = H̃ t₀  (current was 0)
         for k in 2:K                                          # here previous = t_{k−2}, current = t_{k−1}
             kernel(previous, current, matrix..., sums, k, R(2), R(1); threads = THREADS, blocks)  # t_k = 2H̃ t_{k−1} − t_{k−2}, in place of t_{k−2}

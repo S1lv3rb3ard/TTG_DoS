@@ -144,8 +144,10 @@ if there is none, `W_ref`.
 Keyword arguments: `set` (angle triple, `triple_parameters`); `L`, `P`; `candidates` (each smaller
 than `W_ref`); `W_ref`; `Nq` (default 60); `momenta` (default every 30th point); `floor_momenta`
 (default the first and the middle one of `momenta`); `precision` (default `ComplexF32`); `drop`
-(eV, default 10⁻⁵); `E` (default 4001 points of [−0.2, 0.2] eV); `log`; `directory` (if given, the
-moments `mu_W<W>_q<index>.bin` and a `meta.txt` are written there); `ahead` (default 3, momenta prepared in
+(eV, default 10⁻⁵); `E` (default 4001 points of [−0.2, 0.2] eV); `log`; `directory` (if given, it is
+claimed with `claim_directory` before the sweep, so a folder with moments of other parameters is
+refused; the parameters go to `meta.txt`, the moments of every W to `mu_W<W, six decimals>_q<index>.bin`
+as soon as they are computed, and floor and choice to `result.txt`); `ahead` (default 3, momenta prepared in
 advance on CPU threads).
 
 `result` is a named tuple: `choice`, `floor`, `floor_values` (per momentum), `Ws` (sorted
@@ -172,7 +174,17 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
     difference = zeros(length(Ws), length(momenta))
     labels = zeros(Int, length(Ws) + 1, length(momenta))
     seconds = zeros(length(Ws) + 1, length(momenta))
-    moments = directory === nothing ? nothing : Dict{Tuple{Float64,Int},Vector{Float64}}()
+    if directory !== nothing
+        meta = sprint() do io
+            println(io, "theta ", join(θ, " ")); println(io, "L ", L); println(io, "P ", P); println(io, "B_H ", B_H)
+            println(io, "s ", s); println(io, "W_ref ", W_ref); println(io, "candidates ", join(Ws, " "))
+            println(io, "Nq ", Nq); println(io, "momenta ", join(momenta, " ")); println(io, "precision ", precision)
+            println(io, "drop_eV ", drop); println(io, "tau 8.5"); println(io, "delta 6.5")
+            interlayer_meta(io, interlayer)
+        end
+        claim_directory(directory, meta)                 # throws if the folder holds moments of other parameters
+    end
+    save(W, i, μ) = directory === nothing || write_moments(joinpath(directory, @sprintf("mu_W%.6f_q%04d.bin", W, i)), μ)
     floor_values = Dict{Int,Float64}()
     all(in(momenta), floor_momenta) || throw(ArgumentError("floor_momenta must be among momenta"))
     prepare(i) = reference_and_restrictions(model, path.q[i], W_ref, L, [(W, L) for W in Ws];
@@ -182,7 +194,7 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
         prepared = next_prepared()
         S, present, labels[end, column] = prepared.reference
         F_ref, seconds[end, column], μ = gpu_ldos(S, present, s, P; E, kernel)
-        moments === nothing || (moments[(W_ref, i)] = μ)
+        save(W_ref, i, μ)
         if i in floor_momenta
             F₆₄, = gpu_ldos(prepared.H, present, s, B_H, P; precision = ComplexF64, drop = 0.0, E, kernel)
             floor_values[i] = relative_difference(F_ref, F₆₄)
@@ -191,7 +203,7 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
         for (row, W) in enumerate(Ws)
             S, present, labels[row, column] = prepared.smaller[row]
             F, seconds[row, column], μ = gpu_ldos(S, present, s, P; E, kernel)
-            moments === nothing || (moments[(W, i)] = μ)
+            save(W, i, μ)
             difference[row, column] = relative_difference(F, F_ref)
             line *= @sprintf(" W = %.3f: %.1e (%d labels, %.1f s);", W, difference[row, column], labels[row, column], seconds[row, column])
         end
@@ -211,15 +223,7 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
     @printf(log, "W_ref = %.4f: GPU %.1f s per momentum\nfloor %.1e; chosen W = %.3f\n", W_ref,
         sum(seconds[end, :]) / length(momenta), floor, choice); flush(log)
     if directory !== nothing
-        mkpath(directory)
-        for ((W, i), μ) in moments
-            write(joinpath(directory, @sprintf("mu_W%.4f_q%04d.bin", W, i)), μ)
-        end
-        open(joinpath(directory, "meta.txt"), "w") do io
-            println(io, "theta ", join(θ, " ")); println(io, "L ", L); println(io, "P ", P); println(io, "B_H ", B_H)
-            println(io, "s ", s); println(io, "W_ref ", W_ref); println(io, "candidates ", join(Ws, " "))
-            println(io, "momenta ", join(momenta, " ")); println(io, "precision ", precision); println(io, "drop_eV ", drop)
-            interlayer_meta(io, interlayer)
+        open(joinpath(directory, "result.txt"), "w") do io
             println(io, "floor ", floor); println(io, "chosen_W ", choice)
         end
     end

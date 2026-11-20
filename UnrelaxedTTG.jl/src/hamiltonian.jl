@@ -206,6 +206,8 @@ Window(stack, q, W, L))` entry for entry (tested). `present` holds the orbital i
 zero labels in the smaller window, `labels` its number of labels.
 """
 function restrict(stack, window, H, W, L)
+    size(H) == (2length(window), 2length(window)) ||
+        throw(DimensionMismatch("H is $(size(H)), the window has $(2length(window)) orbitals"))
     W, L = triple(eltype(window.W), W), triple(eltype(window.L), L)
     all(W .≤ window.W) && all(L .≤ window.L) || throw(ArgumentError("(W, L) must not exceed the window's"))
     keep = [s for (s, x) in enumerate(window.labels)

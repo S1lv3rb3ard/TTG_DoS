@@ -235,6 +235,7 @@ end
 
 function kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E, K::DeltaChebyshev)
     P = length(μ)
+    P ≥ 1 || throw(ArgumentError("μ must hold at least one moment"))
     for (i, Eᵢ) in enumerate(E)
         total = zero(ComplexF64)
         for (z, w) in zip(K.z, K.w)
@@ -272,6 +273,10 @@ end
 
 function kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E, K::Gaussian)
     P = length(μ)
+    P ≥ 1 || throw(ArgumentError("μ must hold at least one moment"))
+    for Eᵢ in E
+        isfinite(Eᵢ) || throw(DomainError(Eᵢ, "the energies must be finite"))
+    end
     M = gaussian_nodes(P)
     windows = [gaussian_window(s, K.ε, Eᵢ, M) for Eᵢ in E]
     used = filter(!isempty, windows)
@@ -356,7 +361,8 @@ A bound for the difference between ∑_c a_c [δ_ε(E − A)]_{cc} and the densi
 
 - the terms n ≥ P that are left out, at most ∑_{n≥P} |c_n(E)|;
 - the sampling of δ_ε at M = 2P nodes: the computed coefficients are c̃_n = c_n + ∑_{k≥1} (−1)^k
-  (c_{2kM−n} + c_{2kM+n}), so ∑_{n<P} |c̃_n − c_n| ≤ ∑_{m>3P} |c_m| (Remark 7(i) of the note).
+  (c_{2kM−n} + c_{2kM+n}) for 1 ≤ n < P and c̃_0 = c_0 + ∑_{k≥1} (−1)^k c_{2kM} (one term, not
+  two), so ∑_{n<P} |c̃_n − c_n| ≤ ∑_{m>3P} |c_m| (Remark 7(i) of the note).
 
 Each tail ∑_{n≥Q} |c_n(E)| is bounded by R_{Q′}(E) of Proposition 5 ([`gaussian_tail_bound`](@ref))
 for any Q′ ≤ Q, because the tail decreases with Q; R grows with Q′ once Q′s²ε² exceeds about 1.1,
@@ -453,9 +459,11 @@ The scaled matrix H̃ = sH of the recurrence (a new matrix; `H` is not changed),
 ‖H‖_∞ ≤ B_H ([`row_sum_norm`](@ref)). Since ‖H‖₂ ≤ ‖H‖_∞, the check gives
 σ(sH) ⊂ [−(1 − δ_s), 1 − δ_s] ⊂ (−1, 1) for s = (1 − δ_s)/B_H, which the Chebyshev recurrence
 needs. It is made for every matrix because the constants of [`spectral_bound`](@ref) are grid
-estimates of suprema, not bounds. Throws an `ErrorException` if the check fails.
+estimates of suprema, not bounds. Throws an `ErrorException` if the check fails, and an
+`ArgumentError` unless 0 < sB_H < 1.
 """
 function scaled(H::SparseMatrixCSC, s::Real, B_H::Real)
+    0 < s * B_H < 1 || throw(ArgumentError("s B_H = $(s * B_H) must lie in (0, 1), e.g. s = (1 − δ_s)/B_H"))
     bound = row_sum_norm(H)
     bound ≤ B_H || throw(ErrorException("‖Ĥ_q‖_∞ = $bound eV exceeds B_H = $B_H eV; pass a larger B_H"))
     return s * H

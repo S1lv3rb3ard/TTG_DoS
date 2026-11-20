@@ -69,12 +69,13 @@ end
 The sites of the first `length(t)` distinct distances among `sites`, with the amplitude of their
 shell: `radii[n]` is the n-th distinct distance, and `r[i]` is a site at one of these distances
 with amplitude `amplitude[i]` = `t[n]`. Two distances are the same shell when they differ by less
-than 10⁻⁹ a. `sites` must be the points of a lattice patch of `reach` cells in each direction;
+than max(10⁻⁹, 1000 eps(T)) a: 10⁻⁹ a in Float64, 1.2·10⁻⁴ a in Float32, where rounding moves
+equal distances apart by ~10⁻⁶ a (distinct shells of the patch differ by more than 10⁻² a). `sites` must be the points of a lattice patch of `reach` cells in each direction;
 an `ArgumentError` is thrown unless the requested shells lie inside its inscribed disk, of radius
 (√3/2) `reach` a, so that every shell is complete.
 """
 function neighbour_shells(sites::Vector{Vec2{T}}, t::Vector{T}, a::T, reach::Integer) where {T}
-    tolerance = 1e-9 * a
+    tolerance = max(1e-9, 1000 * eps(T)) * a
     d = norm.(sites)
     sorted = sort(d)
     radii = [sorted[i] for i in eachindex(sorted) if i == 1 || sorted[i] - sorted[i-1] > tolerance]

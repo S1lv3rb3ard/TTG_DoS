@@ -1,4 +1,5 @@
-# Production line cut on a GPU, with checkpoints. Same files as `production_linecut.jl`.
+# Production line cut on a GPU, with checkpoints. Same file format as `production_linecut.jl` (whose meta.txt
+# has no precision and drop_eV lines, so a folder of one driver is not resumed by the other).
 #
 #   using CUDA; include("examples/production_linecut_gpu.jl")
 #   linecut_gpu(; set = 2, P = 2000, Nq = 60, directory = "…")
@@ -18,7 +19,7 @@ using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
 include(joinpath(@__DIR__, "kernel_argument.jl"))            # interlayer_meta
 
 """
-    linecut_gpu(; set, P, Nq, directory, W, L, B_H, precision, drop, consumers, builders, queue, budget, log, cpu_workers) -> done
+    linecut_gpu(; set, P, Nq, directory, W, L, B_H, interlayer, ς, precision, drop, consumers, builders, queue, budget, log, cpu_workers) -> done
 
 The Chebyshev moments of the momentum LDoS (4.36) along the path K₁–K₂–Γ₁₂–Γ₂₃–K₂–K₃
 (`linecut(stack, Nq)`, 5`Nq` + 1 momenta), with the recurrence of Section 4.5 on the GPU. For every
@@ -58,7 +59,7 @@ Keyword arguments:
 - `precision`: element type of the recurrence, `ComplexF64` (default) or `ComplexF32`.
 - `drop` (eV): entries with |h| ≤ `drop` are removed before the recurrence (0 keeps the full matrix).
   The change of Ĥ_q is bounded in norm by the largest removed row sum; it is not estimated here.
-- `consumers`: number of GPU tasks (default 2); `builders`: number of CPU assembly tasks
+- `consumers`: number of GPU tasks (default 2, at least 1); `builders`: number of CPU assembly tasks
   (default: the number of Julia threads − `consumers` − 1, at least 1); `queue`: assembled matrices held between them.
 - `cpu_workers`: further tasks that compute whole momenta on the CPU (default 0; measured on
   15 November 2026 to slow the run down, keep 0).
@@ -68,8 +69,8 @@ Keyword arguments:
 Files in `directory`:
 
 - `meta.txt`: one `key value…` line each for theta, W, L, P, Nq, B_H, J (= 𝔍), delta_s, s, precision,
-  drop_eV, tau, delta, the intralayer table with E_D, ticks and arclength (the arc lengths of the
-  vertices and of all momenta, Å⁻¹).
+  drop_eV, tau, delta, the intralayer table with E_D, interlayer (not for Fang–Kaxiras), varsigma
+  (only for ς > 0), ticks and arclength (the arc lengths of the vertices and of all momenta, Å⁻¹).
 - `mu_<index>.bin`: the `P` moments of momentum number `index` (1-based, four digits) as raw
   `Float64` in the byte order of the machine. Read with `read!(name, Vector{Float64}(undef, P))`.
 
@@ -82,6 +83,9 @@ this call.
 Errors. If a task fails (for example, the GPU runs out of memory, or ‖Ĥ_q‖_∞ > B_H), the error is
 written to `log`, the other tasks stop after the momentum they are working on, and the call
 throws the error. The moments written until then are kept, so the same call resumes the run.
+If the call itself is interrupted (Ctrl-C), it first stops all its tasks and waits until they have
+finished their current momentum, so that no task writes into the folder after the call has
+returned. A file that is missing, empty or cut short is computed again (`moments_complete`).
 
 The Julia session must have several threads (`julia -t auto`); `using CUDA` must come before
 `include` of this file.
@@ -90,6 +94,7 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
                      consumers::Int = 2, builders::Int = max(1, Threads.nthreads() - consumers - 1),
                      queue::Int = 6, budget::Real = Inf, log::IO = stdout, precision::Type = ComplexF64, drop::Real = 0.0, cpu_workers::Int = 0,
                      interlayer::Union{Symbol,InterlayerModel} = DEFAULT_INTERLAYER, ς::Real = 0)
+    consumers ≥ 1 || throw(ArgumentError("consumers must be at least 1 (the GPU tasks); for a run on the CPU only use production_linecut.jl"))
     θ, W₀, L₀ = triple_parameters(set)
     W = something(W, W₀); L = something(L, L₀)
     stack = Stack(1.42 * √3, θ)
@@ -110,7 +115,7 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
     end
     claim_directory(directory, meta)                   # throws if the folder holds moments of a run with other parameters
     file(i) = joinpath(directory, @sprintf("mu_%04d.bin", i))
-    pending = [i for i in eachindex(path.q) if !isfile(file(i))]
+    pending = [i for i in eachindex(path.q) if !moments_complete(file(i), P)]
     @printf(log, "%d of %d momenta to do; B_H = %.4f eV, ε_P = %.3f meV, %d builders, %d GPU tasks, interlayer %s\n", length(pending),
         length(path.q), B_H, 1e3 * kpm_resolution(s, P), builders, consumers, interlayer_label(interlayer) * (ς > 0 ? ", ς = $ς Å" : "")); flush(log)
     start = time()
@@ -157,7 +162,7 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
                 H̃_gpu = gpu_matrix(H̃)
                 μ = chebyshev_moments(H̃_gpu, present, P)
                 CUDA.unsafe_free!(H̃_gpu)
-                write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
+                write_moments(file(i), μ)
                 Threads.atomic_add!(done, 1)
                 lock(report) do
                     @printf(log, "q %4d: %6d labels, %6d rows reached, %d zero labels, GPU %5.2f s, %7.0f s elapsed\n", i, labels,
@@ -178,7 +183,7 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
                 drop > 0 && droptol!(H, drop)
                 H̃ = SparseMatrixCSC{precision,Int}(UnrelaxedTTG.scaled(H, s, B_H))
                 μ = chebyshev_moments(H̃, present, P)
-                write(file(i) * ".tmp", μ); mv(file(i) * ".tmp", file(i); force = true)
+                write_moments(file(i), μ)
                 Threads.atomic_add!(done, 1)
                 lock(report) do
                     @printf(log, "q %4d: %6d labels, %d zero labels, CPU %5.1f s, %7.0f s elapsed\n", i, length(window),
@@ -187,7 +192,17 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
             end
         end
     end
-    foreach(wait, build); close(built); foreach(wait, consume); foreach(wait, cpu)
+    try
+        foreach(wait, build); close(built); foreach(wait, consume); foreach(wait, cpu)
+    catch err                                              # e.g. an interrupt (Ctrl-C) of this call: the tasks
+        stop[] = true                                      # are not cancelled by it, so stop them and wait until
+        close(built)                                       # they have finished their momentum, so that no task
+        @printf(log, "interrupted (%s); waiting for the tasks to finish their momentum\n", typeof(err)); flush(log)
+        for task in [build; consume; cpu]                  # still writes into the folder after this call returns
+            try wait(task) catch end
+        end
+        rethrow()
+    end
     if failure[] !== nothing                               # the moments written so far are kept; the same call resumes
         @printf(log, "stopped by an error after %d momenta in %.0f s; %d remain\n", done[], time() - start, length(pending) - done[]); flush(log)
         throw(failure[])

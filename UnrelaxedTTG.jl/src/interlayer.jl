@@ -247,8 +247,8 @@ Chebyshev nodes in ρ. `R` is the real-space cutoff of the integral (the radial
 functions decay like Gaussians in s/a; at s = 8a they are below 10⁻⁴⁰ eV).
 `c[m, i]` is the coefficient of T_{m−1} for the order n = (0, 3, 6)[i]. Trailing
 coefficients below `tolerance` times the largest coefficient are dropped (for
-the default parameters the coefficients reach the rounding level 10⁻¹⁶ near
-m = 60), which shortens the Clenshaw sum of [`hankel`](@ref).
+the τ = 8.5 of the examples 53 rows are kept with the default refit and 54 with
+Fang–Kaxiras), which shortens the Clenshaw sum of [`hankel`](@ref).
 """
 struct HankelTable{T<:Real}
     ρmax::T
@@ -267,10 +267,11 @@ function HankelTable(p::InterlayerModel, a::Real, ρmax::Real; R::Real = 8a, n�
     values = zeros(T, M, 3)
     for (i, θᵢ) in enumerate(θ)
         ρ = ρmax * (1 + cos(θᵢ)) / 2
+        exact = closed_form_hankel(p, a, ρ)
         for (col, order) in enumerate((0, 3, 6))
+            exact === nothing || col == 1 || continue        # ℋ₃, ℋ₆ in closed form: no quadrature
             values[i, col] = sum(q -> ws[q] * V[q][col] * besselj(order, ρ * s[q]), eachindex(s))
         end
-        exact = closed_form_hankel(p, a, ρ)
         exact === nothing || (values[i, 2:3] .= exact)
     end
     c = zeros(T, M, 3)
