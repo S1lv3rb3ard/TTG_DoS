@@ -1,5 +1,6 @@
 using UnrelaxedTTG
 using LinearAlgebra, Random, SparseArrays, StaticArrays, Test
+using SpecialFunctions: besselix
 
 const U = UnrelaxedTTG
 
@@ -552,6 +553,92 @@ end
     @test 1.5 < log2(jackson_error(200) / jackson_error(400)) < 2.5
 end
 
+@testset "Gaussian kernel (KPM error note of 16 November 2026, Section 4)" begin
+    K = Gaussian(0.004)
+    @test K(0.3, 0.3) ≈ 1 / (0.004 * sqrt(2π))
+    @test K(0.31, 0.3) ≈ exp(-0.01^2 / (2 * 0.004^2)) / (0.004 * sqrt(2π))
+    @test_throws ArgumentError Gaussian(0.0)
+    @test_throws ArgumentError Gaussian(-1e-3)
+    @test sprint(show, K) == "Gaussian(0.004)"
+    @test kpm_resolution(0.23, 4000, K) == 0.004
+
+    # the coefficients themselves: μ = e_n gives c̃_n(E). At E = 0 (Lemma 4(b)) c_{2k+1}(0) = 0 and
+    # c_{2k}(0) = (2 − δ_{k0}) (−1)^k e^{−z} I_k(z)/(ε√(2π)) with z = 1/(4s²ε²); e^{−z} I_k(z) = besselix(k, z).
+    s, P = 0.23, 400
+    for sε in (π / P, 4 / P, 8 / P)
+        ε = sε / s
+        z = 1 / (4 * s^2 * ε^2)
+        exact(n) = isodd(n) ? 0.0 : (n == 0 ? 1 : 2) * (-1)^(n ÷ 2) * besselix(n ÷ 2, z) / (ε * sqrt(2π))
+        computed = [kpm_density(Float64.(0:P-1 .== n), s, [0.0]; kernel = Gaussian(ε))[1] for n in 0:P-1]
+        @test maximum(abs, computed - exact.(0:P-1)) ≤ 1e-12 / ε
+    end
+
+    # against the coefficients from a direct cosine sum at M = 16P nodes, at energies away from 0
+    # (tests the restriction of the nodes to |E − x_j/s| ≤ 40ε)
+    ε = 4 / (s * P)
+    E = [-3.9, -1.3, -0.2, 0.0371, 0.9, 2.5, 4.3, 5.0] ./ s .* 0.2       # includes |sE| near and beyond 1
+    M = 16P
+    θ = [π * (j + 1 / 2) / M for j in 0:M-1]
+    for Eᵢ in E, n in (0, 1, 7, 150, P - 1)
+        direct = (n == 0 ? 1 : 2) / M * sum(Gaussian(ε)(Eᵢ, cos(θⱼ) / s) * cos(n * θⱼ) for θⱼ in θ)
+        computed = kpm_density(Float64.(0:P-1 .== n), s, [Eᵢ]; kernel = Gaussian(ε))[1]
+        @test abs(computed - direct) ≤ 1e-12 / ε
+    end
+
+    # one eigenvalue x₀/s: μ_n = T_n(x₀), and the density must be δ_ε(E − x₀/s) up to the bound
+    for (sε, P) in ((π / 400, 400), (4 / 400, 400), (6 / 1000, 1000), (1 / 300, 300))
+        K = Gaussian(sε / s)
+        E = range(-1.2 / s, 1.2 / s; length = 241)
+        b = truncation_bound(K, s, E, P)
+        outside = [abs(s * Eᵢ) ≥ 1 for Eᵢ in E]                           # (not s .* E: a range rounds differently)
+        @test all(isinf, b[outside]) && all(isfinite, b[.!outside])
+        for x₀ in (-1.0, -0.999, -0.4, 0.0, 0.0123, 0.77, 1.0)
+            μ = [cos(n * acos(x₀)) for n in 0:P-1]
+            error = abs.(kpm_density(μ, s, E; kernel = K) .- K.(E, x₀ / s))
+            @test all(error .≤ b .+ 1e-11 / K.ε)
+        end
+    end
+    # the bound is small at P sε = 6 and reports too few moments at P sε = 1
+    @test maximum(truncation_bound(Gaussian(6 / (1000s)), s, range(-0.5 / s, 0.5 / s; length = 11), 1000)) <
+          1e-7 * Gaussian(1.0)(0.0, 0.0) / (6 / (1000s))
+    @test minimum(truncation_bound(Gaussian(1 / (300s)), s, range(-0.5 / s, 0.5 / s; length = 11), 300)) >
+          0.1 * Gaussian(1 / (300s))(0.0, 0.0)
+    @test truncation_bound(Gaussian(0.01), s, 0.1, 500) ≈ truncation_bound(Gaussian(0.01), s, [0.1], 500)[1]
+    @test_throws ArgumentError truncation_bound(Gaussian(0.01), s, 0.1, 0)
+
+    # Proposition 5 at the values of Table 2 of the note (s = 0.2321/eV, E = 0.2 eV, P = 4000)
+    s₂ = 0.2321
+    for (Psε, R) in ((π, 0.506), (4, 1.5e-2), (5, 1.0e-4), (6, 2.9e-7), (7, 3.3e-10))
+        @test U.gaussian_tail_bound(s₂, Psε / (4000s₂), 0.2, 4000) ≈ R rtol = 0.04
+    end
+    @test U.gaussian_tail_bound(s₂, 0.004, 1 / s₂, 4000) == Inf
+    # the bound for fewer moments is used once P s²ε² is large (the tail decreases with P)
+    ε = 0.5 / s₂
+    @test truncation_bound(Gaussian(ε), s₂, 0.0, 10^4) ≤ 2 * U.gaussian_tail_bound(s₂, ε, 0.0, floor(Int, 1.09 / (s₂ * ε)^2))
+    @test isfinite(truncation_bound(Gaussian(ε), s₂, 0.0, 10^4))
+    @test isfinite(truncation_bound(Gaussian(0.004), s₂, 0.0, 10^9))       # cosh and sinh overflow at P = 10⁹
+    @test U.gaussian_tail_bound(s₂, 0.004, 0.0, 10^9) == Inf
+
+    # a Hermitian matrix: against the Gaussian density from the eigendecomposition
+    A = Hermitian(randn(ComplexF64, 60, 60))
+    s = 0.95 / opnorm(A)
+    P = 600
+    μ = chebyshev_moments(sparse(s * A), [7, 12], P)
+    E = range(-1 / s, 1 / s; length = 101)
+    for Psε in (π, 4, 6)
+        K = Gaussian(Psε / (s * P))
+        exact = gaussian_density(A, 7, E, K.ε) + gaussian_density(A, 12, E, K.ε)
+        ρ = kpm_density(μ, s, E; kernel = K)
+        @test all(abs.(ρ - exact) .≤ 2 .* truncation_bound(K, s, E, P) .+ 1e-9 * maximum(abs, exact))
+        @test kpm_density!(zeros(101), μ, s, E; kernel = K) == ρ
+    end
+    @test maximum(abs, kpm_density(μ, s, E; kernel = Gaussian(6 / (s * P))) -
+                       (gaussian_density(A, 7, E, 6 / (s * P)) + gaussian_density(A, 12, E, 6 / (s * P)))) <
+          1e-6 * maximum(gaussian_density(A, 7, E, 6 / (s * P)))
+    # energies far outside the spectrum: zero
+    @test all(iszero, kpm_density(μ, s, [-3 / s, 3 / s]; kernel = Gaussian(0.01 / s)))
+end
+
 @testset "momentum LDoS (eq. (4.36), convention (4.10))" begin
     E = range(-0.4, 0.4; length = 81)
     q = [stack.K[2] + SVector(0.01, 0.02), stack.K[2] + SVector(0.3, 0.0), stack.K[1]]
@@ -582,6 +669,14 @@ end
     weight = vec(sum(abs2, view(decomposition.vectors, start, :); dims = 1))
     exact = [sum(weight .* K.(Eᵢ, decomposition.values)) for Eᵢ in E] / 6
     @test maximum(abs, high.ldos[1, :] - exact) ≤ maximum(truncation_bound(K, result.s, E, P)) + 1e-9
+    # the same moments with the Gaussian kernel, against the Gaussian LDoS from the eigenvalues
+    G = Gaussian(5 / (result.s * P))
+    gauss = momentum_ldos(model, q, E; W, L, P, kernel = G)
+    @test gauss.μ == result.μ && gauss.kernel === G && gauss.resolution == G.ε
+    @test gauss.ldos[1, :] ≈ kpm_density(μ, result.s, E; kernel = G) / 6
+    @test all(iszero, gauss.ldos[2, :])
+    exact = sum(o -> gaussian_density(H, o, E, G.ε), start) / 6
+    @test maximum(abs, gauss.ldos[1, :] - exact) ≤ maximum(truncation_bound(G, result.s, E, P)) + 1e-9
     path = linecut(stack, 4)
     @test length(path.q) == 21 && path.q[1] ≈ stack.K[1] && path.q[end] ≈ stack.K[3]
     @test path.q[5] ≈ stack.K[2] && path.q[17] ≈ stack.K[2]
@@ -626,6 +721,11 @@ end
     @test high.ρ == kpm_density(coarse.μ, coarse.s, E; kernel = K)
     high = brillouin_dos(model, E; W, L, N = 6, P = 64, kernel = K)
     @test high.μ == grid.μ && high.ρ == kpm_density(grid.μ, grid.s, E; kernel = K)
+    # and with the Gaussian kernel
+    G = Gaussian(0.05)
+    gauss = moire_dos(model, E; W, L, N = 2, P = 64, kernel = G)
+    @test gauss.μ == coarse.μ && gauss.kernel === G && gauss.resolution == 0.05
+    @test gauss.ρ == kpm_density(coarse.μ, coarse.s, E; kernel = G)
 end
 
 @testset "a posteriori bounds (Lemma 4.4, Remark 4.5, Lemma C.4)" begin

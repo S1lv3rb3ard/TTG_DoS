@@ -28,6 +28,7 @@ G = (G_s)_{s≠t} with G_s = B_s m_s, m_s ∈ ℤ². A label has the momentum k_
 | Chebyshev moments | μ_n = ∑_c [T_n(sĤ_q)]_cc, s = (1 − δ_s)/B_H | `chebyshev_moments` (CPU and GPU), `SlicedELL`, `reachable` |
 | KPM density (4.33), (4.34) | s/(π√(1 − (sE)²)) ∑_n g_n^P μ_n T_n(sE) | `kpm_density`, `jackson` (kernel `Jackson()`, the default) |
 | Delta-Chebyshev density (arXiv:2512.03149, (15)–(18)) | ∑_n ν_n(E) μ_n, the series of the rational kernel K_η of order m | `kpm_density(…; kernel = DeltaChebyshev(η, m))`, `truncation_bound` |
+| Gaussian density (Section 2.5; KPM error note, Section 4) | ∑_{n<P} c_n(E) μ_n, the Chebyshev series of δ_ε(E − ·) | `kpm_density(…; kernel = Gaussian(ε))`, `truncation_bound` |
 | Momentum LDoS (4.36) | (1/6) ∑_{jα} [δ^P_KPM(E, Ĥ_q)]_{(0,jα),(0,jα)} | `momentum_ldos`, `examples/production_linecut_gpu.jl` |
 | Density of states (4.39), (4.1) | moiré-cell rule, Brillouin-zone rule | `moire_dos`, `brillouin_dos` |
 | A posteriori diagnostics | Lemma 4.4, Remark 4.5, Lemma C.4 | `flux_bound`, `transfer_norm` (dense, small windows) |
@@ -47,7 +48,7 @@ src/interlayer.jl       hopping (F.5) with the models FANG_KAXIRAS, ANALYTIC_REF
 src/window.jl           Label, Window (direct enumeration), search_window (Theorem 4.3(b))
 src/hamiltonian.jl      Model, hamiltonian, spectral_bound
 src/parameters.jl       ANGLE_SETS, triple_parameters (angle triples with their W and L), claim_directory
-src/kpm.jl              kernels Jackson and DeltaChebyshev, kpm_density, truncation_bound, chebyshev_moments (CPU), gpu_matrix (stub)
+src/kpm.jl              kernels Jackson, DeltaChebyshev and Gaussian, kpm_density, truncation_bound, chebyshev_moments (CPU), gpu_matrix (stub)
 src/sell.jl             reachable (rows the recurrence can reach), SlicedELL (storage for the GPU recurrence)
 src/dos.jl              Linecut, momentum_ldos, moire_dos, brillouin_dos
 src/posteriori.jl       a posteriori diagnostics of the truncation
@@ -97,7 +98,7 @@ result.ldos                                        # momenta × energies, 1/eV
 
 Start Julia with several threads (`julia -t auto`); the momenta are distributed over them.
 
-## Choice of the kernel: Jackson or delta-Chebyshev
+## Choice of the kernel: Jackson, delta-Chebyshev or Gaussian
 
 The Chebyshev moments μ_n do not depend on how the density is regularised. `kpm_density`,
 `momentum_ldos`, `moire_dos` and `brillouin_dos` take the keyword `kernel`:
@@ -155,6 +156,46 @@ s = 0.2321 eV⁻¹; `truncation_bound` and the largest difference of the LDoS be
 The order of convergence is tested on a density with known moments (the semicircle density, test
 set "delta-Chebyshev kernel"): orders 1, 2, 4, 4, 6, 6 for m = 1, …, 6 in η, and 2 in 1/P for Jackson.
 The total density of states, where the density is smooth, has not been run with this kernel.
+
+### The Gaussian kernel (version 0.7.0)
+
+- `kernel = Gaussian(ε)`: the Gaussian δ_ε(E − x) = exp(−(E − x)²/(2ε²))/(ε√(2π)) of Section 2.5,
+  the regularisation in which the momentum LDoS and its error estimate are stated, expanded in
+  Chebyshev polynomials: ρ(E) = ∑_{n<P} c_n(E) μ_n with δ_ε(E − x/s) = ∑_n c_n(E) T_n(x) on [−1, 1].
+  The width ε is chosen independently of P. The terms left out are bounded by `truncation_bound`
+  (Proposition 5 of the KPM error note of 16 November 2026), which decays like exp(−(Psε)²/2);
+  P sε ≥ 4 makes it 1.6 × 10⁻⁴ of the peak 1/(ε√(2π)) or less. The Jackson kernel differs from
+  δ_ε of the same nominal width by about 2.7 % of the peak, for every P. The truncated series can be
+  slightly negative in gaps, by at most `truncation_bound`.
+
+```julia
+K = Gaussian(4 / (result.s * length(μ)))             # ε = 4/(sP)
+F = kpm_density(μ, result.s, E; kernel = K) ./ 6
+b = truncation_bound(K, result.s, E, length(μ))      # left-out terms and sampling, per unit μ₀ (1/eV)
+```
+
+The coefficients are sampled at the M = 2P Chebyshev nodes (a discrete cosine transform, written
+as one sum over the nodes, with the sum over n done once per node), so their aliasing error is
+that of the coefficients c_m, m > 3P, and is included in `truncation_bound`. Scripts take
+`gauss=<ε in eV>` (`kernel_argument.jl`); the log line gives P sε.
+
+Measured on 20 November 2026 with `examples/compare_kernels_linecut.jl` (801 energies in
+[−0.2, 0.2] eV, 301 momenta, P = 4000; difference (3.4) per momentum, median over the momenta):
+
+| line cut | comparison | median | worst |
+|---|---|---|---|
+| θ = (−√3/2°, 0°, √2/2°), W = 0.3771, L = 45.84 (F32, drop 10⁻⁵) | Gaussian ε = π/(sP) = 3.38 meV against Jackson | 1.4 × 10⁻² | 2.0 × 10⁻² |
+| θ = (−1.39°, 0°, 2.4°), W = 0.35, L = 47.375 (F64, 8000 moments) | Jackson against the Gaussian LDoS at ε = π/(sP) = 3.22 meV | 2.5 × 10⁻² | 4.0 × 10⁻² |
+| same | Gaussian kernel, ε = π/(sP), against the same | 1.5 × 10⁻³ | 2.3 × 10⁻³ |
+| same | Gaussian kernel, ε = 4/(sP) = 4.10 meV, against the Gaussian LDoS at that ε | 5.4 × 10⁻⁵ | 1.0 × 10⁻⁴ |
+
+The Gaussian LDoS of the second line cut is the Gaussian kernel with all 8000 moments; by
+`truncation_bound` it is within 9.9 × 10⁻⁸ eV⁻¹ (ε = 3.22 meV) and 2.9 × 10⁻¹³ eV⁻¹ (ε = 4.10 meV) of
+the Gaussian momentum LDoS (1/6) ∑_{jα} [δ_ε(E − Ĥ_q)]_{(0,jα),(0,jα)}. The Jackson peaks are higher
+by about 1.7 %; the Gaussian series is negative at
+2.8 % of the points of that line cut at ε = π/(sP), down to −0.0073 eV⁻¹ (0.07 % of its largest
+value), and down to −1.3 × 10⁻⁴ eV⁻¹ at ε = 4/(sP). Evaluating the 301 momenta takes 0.2–0.3 s on
+8 threads with either kernel.
 
 ## Choice of the interlayer model: Fang–Kaxiras or the analytic refit
 
@@ -334,7 +375,8 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
 | `production_linecut.jl` | CPU line cut with the same files as the GPU driver |
 | `ldos_convergence.jl` | W- and L-convergence of the LDoS at ten momenta (CPU) |
 | `ldos_from_moments.jl` | LDoS table from a folder of moments, with either kernel |
-| `kernel_argument.jl` | the arguments `eta=<η>` and `m=<order>` of `ldos_linecut.jl`, `ldos_from_moments.jl`, `moire_dos.jl` (delta-Chebyshev kernel), and `interlayer=<name>` of the CPU scripts |
+| `compare_kernels_linecut.jl` | Jackson against the Gaussian kernel on the stored moments of a line cut, with references from more moments if there are |
+| `kernel_argument.jl` | the arguments `eta=<η>` and `m=<order>` (delta-Chebyshev kernel) and `gauss=<ε>` (Gaussian kernel) of `ldos_linecut.jl`, `ldos_from_moments.jl`, `moire_dos.jl`, and `interlayer=<name>` of the CPU scripts |
 | `moire_dos.jl` | density of states by the moiré-cell rule (4.39) |
 | `posteriori.jl` | a posteriori diagnostics of Lemma 4.4 |
 | `cross_check_relaxed.jl` | comparison with `RelaxedTTG.jl` at zero relaxation |
@@ -362,6 +404,8 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
   covered by the error estimates of the manuscript.
 - The manuscript (Section 4.5 and its error estimates) is written for the Jackson kernel.
   `DeltaChebyshev` is an alternative evaluation of the same moments and is not covered by it.
+  `Gaussian` evaluates the Gaussian regularisation of Section 2.5 itself, with the bound of
+  Proposition 5 of the KPM error note (not yet in the manuscript).
 - The W and L of sets 1 and 2 in `ANGLE_SETS` are the manuscript's values; (5.3)–(5.5) evaluated
   for a = 1.42√3 Å give 0.4748, 19.43 and 0.3777, 30.60 (fourth-digit difference).
 - `claim_directory` compares `meta.txt` as text, so a folder is refused when a parameter is passed

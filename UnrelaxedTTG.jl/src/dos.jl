@@ -89,11 +89,13 @@ available threads.
 
 With `kernel = DeltaChebyshev(η, m)` the regularisation δ^P_KPM is replaced by the rational kernel
 K_η of order m, evaluated from the same P moments ([`kpm_density`](@ref),
-[`truncation_bound`](@ref)); `kernel = Jackson()` is (4.36).
+[`truncation_bound`](@ref)); with `kernel = Gaussian(ε)` by the Gaussian δ_ε itself, expanded in
+Chebyshev polynomials, so that the result approximates the Gaussian LDoS of Section 2.5 up to
+`truncation_bound`; `kernel = Jackson()` is (4.36).
 
 `result`: `E`, `q`, `ldos` (momenta × energies), `μ` (momenta × P, summed over
 the zero-label orbitals present), `s`, `B_H`, `kernel`, `resolution` (ε_P for the Jackson kernel,
-η for `DeltaChebyshev`; [`kpm_resolution`](@ref)), `labels` (number of labels per q) and `present`
+η for `DeltaChebyshev`, ε for `Gaussian`; [`kpm_resolution`](@ref)), `labels` (number of labels per q) and `present`
 (number of zero labels in the window).
 """
 function momentum_ldos(model::Model{T}, q::AbstractVector, E; W, L, P::Integer, δ_s::Real = 0.05,
@@ -149,10 +151,11 @@ A centre label with ‖B_k m‖₂ ≥ L_j is not in ℒ*(L) and is skipped; the
 skipped centres is returned in `missing` (increase L until it is 0).
 
 `kernel = DeltaChebyshev(η, m)` evaluates the same weighted moments with the rational kernel K_η of
-order m in place of δ^P_KPM ([`kpm_density`](@ref)); the weights of the rule are positive, so
+order m in place of δ^P_KPM ([`kpm_density`](@ref)), and `kernel = Gaussian(ε)` with the Gaussian
+δ_ε expanded in Chebyshev polynomials; the weights of the rule are positive, so
 [`truncation_bound`](@ref) applies with μ₀ = `mass`.
 
-`result`: `E`, `ρ`, `μ` (weighted moments), `s`, `B_H`, `kernel`, `resolution` (ε_P or η,
+`result`: `E`, `ρ`, `μ` (weighted moments), `s`, `B_H`, `kernel`, `resolution` (ε_P, η or ε,
 [`kpm_resolution`](@ref)), `mass` =
 μ₀ (the weight of the sampled centres), `disk_mass` = ν* · 4π ∑_j W_j² (its limit
 as N → ∞), `point_moments[g]` (N² × P, one array per layer and valley, in the

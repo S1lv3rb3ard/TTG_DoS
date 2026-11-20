@@ -13,7 +13,10 @@
 #
 # `DeltaChebyshev(η, m)`, the high-order regularized delta-Chebyshev method of Yi, Massatt,
 # Horning, Luskin, Pixley and Kaye (arXiv:2512.03149), with a rational kernel of order m at the
-# smoothing parameter η.
+# smoothing parameter η;
+#
+# `Gaussian(ε)`, the truncated Chebyshev expansion of the Gaussian δ_ε of Section 2.5 of the
+# manuscript (KPM error note of 16 November 2026, Section 4).
 
 """
     Kernel
@@ -22,9 +25,10 @@ The regularisation of a density computed from Chebyshev moments, chosen with the
 of [`kpm_density`](@ref), [`momentum_ldos`](@ref), [`moire_dos`](@ref) and [`brillouin_dos`](@ref):
 
 - [`Jackson`](@ref)`()`, the default: the Jackson kernel of the manuscript, eqs. (4.33), (4.34);
-- [`DeltaChebyshev`](@ref)`(η, m)`: the rational kernel of order m of arXiv:2512.03149.
+- [`DeltaChebyshev`](@ref)`(η, m)`: the rational kernel of order m of arXiv:2512.03149;
+- [`Gaussian`](@ref)`(ε)`: the Gaussian δ_ε of width ε, expanded in Chebyshev polynomials.
 
-The moments μ_n are the same for both, so a stored set of moments can be evaluated with either.
+The moments μ_n are the same for all of them, so a stored set of moments can be evaluated with any.
 """
 abstract type Kernel end
 
@@ -84,6 +88,41 @@ end
 Base.show(io::IO, K::DeltaChebyshev) = print(io, "DeltaChebyshev(", K.η, ", ", length(K.z), ")")
 
 """
+    Gaussian(ε)
+
+The Gaussian δ_ε(E − x) = exp(−(E − x)²/(2ε²))/(ε√(2π)) of width ε > 0 (eV) of Section 2.5 of the
+manuscript, the regularisation in which the momentum LDoS and its error estimate are stated. The
+density is the truncated Chebyshev expansion of δ_ε(E − A) itself (KPM error note of 16 November
+2026, revised 18 November, Section 4):
+
+    δ_ε(E − x/s) = ∑_{n≥0} c_n(E) T_n(x),   c_n(E) = ((2 − δ_{n0})/π) ∫_0^π δ_ε(E − cos θ/s) cos nθ dθ,
+
+for x ∈ [−1, 1], so that ∑_c [δ_ε(E − A)]_{cc} ≈ ∑_{n<P} c_n(E) μ_n ([`kpm_density`](@ref)). The
+left-out terms are bounded by [`truncation_bound`](@ref) (Proposition 5 of the note); they decay
+like exp(−(Psε)²/2), so P sε ≥ 4 is enough in practice (Table 2 of the note: the bound is
+1.6 × 10⁻⁴ of the peak value 1/(ε√(2π)) for P sε = 4). Unlike the Jackson kernel, whose width is fixed
+by P and which differs from δ_ε by about 2.7 % of the peak however large P is, ε is chosen
+independently of P, and the error tends to zero as P grows at fixed ε.
+
+The truncated expansion is not a positive kernel: the density can be negative where the exact
+regularised density is small, by at most the truncation bound. Expanding a Gaussian-smoothed delta
+function in orthogonal polynomials is not new: Lin, Saad and Yang (SIAM Rev. 58 (2016) 34,
+Section 3.1.3) expand it in Legendre polynomials (Delta–Gauss–Legendre). Field: `ε`. `K(E, x)`
+evaluates δ_ε(E − x).
+"""
+struct Gaussian <: Kernel
+    ε::Float64
+    function Gaussian(ε::Real)
+        ε > 0 || throw(ArgumentError("the width ε must be positive"))
+        return new(ε)
+    end
+end
+
+(K::Gaussian)(E::Real, x::Real) = exp(-(E - x)^2 / (2 * K.ε^2)) / (K.ε * sqrt(2π))
+
+Base.show(io::IO, K::Gaussian) = print(io, "Gaussian(", K.ε, ")")
+
+"""
     jackson(P) -> g
 
 Jackson coefficients of eq. (4.34), g[n+1] = g_n^P for n = 0, …, P − 1:
@@ -100,9 +139,10 @@ end
     kpm_resolution(s, P[, kernel]) -> ε
 
 The parameter (eV) that sets the energy resolution of the density from P moments at the scale s:
-the nominal resolution ε_P = π/(sP) of the Jackson kernel (Section 4.5; default), and the smoothing
-parameter η of a [`DeltaChebyshev`](@ref) kernel, which does not depend on P. The two are not
-widths of the same kind. The full width at half maximum of the kernel is 2.38 ε_P for Jackson
+the nominal resolution ε_P = π/(sP) of the Jackson kernel (Section 4.5; default), the smoothing
+parameter η of a [`DeltaChebyshev`](@ref) kernel, and the width ε of a [`Gaussian`](@ref) kernel;
+the last two do not depend on P. They are not widths of the same kind. A Gaussian of width ε has
+the full width at half maximum 2.35ε. The full width at half maximum of the kernel is 2.38 ε_P for Jackson
 (computed at the centre of the scaled interval for P = 4000) and 2η, 1.46η, 1.13η, 0.92η, 0.77η,
 0.66η for the delta-Chebyshev kernels of order m = 1, …, 6; the kernels of Jackson with P moments
 and of order 6 with η = 3.58 ε_P = 11.2/(sP) have the same width.
@@ -110,6 +150,7 @@ and of order 6 with η = 3.58 ε_P = 11.2/(sP) have the same width.
 kpm_resolution(s::Real, P::Integer) = π / (s * P)
 kpm_resolution(s::Real, P::Integer, ::Jackson) = kpm_resolution(s, P)
 kpm_resolution(::Real, ::Integer, K::DeltaChebyshev) = K.η
+kpm_resolution(::Real, ::Integer, K::Gaussian) = K.ε
 
 """
     kpm_density!(ρ, μ, s, E; kernel = Jackson()) -> ρ
@@ -142,6 +183,21 @@ and |ϱ| < 1 for Im ζ > 0 with the principal square root. With ζ_l = s(E + η 
 [`truncation_bound`](@ref) bounds the part of the series that is left out, and the difference to
 the density from fewer moments, `view(μ, 1:P′)`, measures it (the reference chooses P this way).
 `E` is not restricted.
+
+`kernel = Gaussian(ε)`: the truncated Chebyshev expansion of the Gaussian δ_ε,
+
+    ρ(E) = ∑_{n=0}^{P−1} c̃_n(E) μ_n,      δ_ε(E − x/s) = ∑_{n≥0} c_n(E) T_n(x),   x ∈ [−1, 1],
+
+which approximates ∑_c [δ_ε(E − A)]_{cc}. The coefficients
+c̃_n(E) = ((2 − δ_{n0})/M) ∑_j δ_ε(E − x_j/s) cos nθ_j are those of the discrete cosine transform at
+the M = 2P Chebyshev nodes x_j = cos θ_j, θ_j = π(j + 1/2)/M, j = 0, …, M − 1; they differ from
+c_n(E) only by aliasing of the coefficients c_m with m > 3P. The sum is evaluated as
+
+    ρ(E) = (1/M) ∑_j δ_ε(E − x_j/s) g_j,      g_j = μ_0 + 2 ∑_{n=1}^{P−1} μ_n T_n(x_j),
+
+with g_j computed once for all energies and only at the nodes with |E − x_j/s| ≤ 40ε for some E
+(at the other nodes δ_ε underflows to zero). [`truncation_bound`](@ref) bounds the terms left out
+and the aliasing together; P sε ≥ 4 makes both small. `E` is not restricted.
 """
 kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E; kernel::Kernel = Jackson()) =
     kpm_density!(ρ, μ, s, E, kernel)
@@ -195,6 +251,55 @@ function kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E, K::Del
 end
 
 """
+    gaussian_nodes(P) -> M
+
+Number M = 2P of Chebyshev nodes x_j = cos θ_j, θ_j = π(j + 1/2)/M, j = 0, …, M − 1, at which
+[`kpm_density`](@ref) samples δ_ε for the kernel [`Gaussian`](@ref).
+"""
+gaussian_nodes(P::Integer) = 2P
+
+# Nodes j with |E − x_j/s| ≤ 40ε, for one energy: outside them exp(−(E − x_j/s)²/(2ε²)) < e⁻⁸⁰⁰
+# underflows to 0.0, so leaving them out of the sum changes nothing. One node is added on each side
+# against rounding in acos.
+function gaussian_window(s::Real, ε::Real, E::Real, M::Integer)
+    x₋, x₊ = s * (E - 40ε), s * (E + 40ε)
+    (x₋ > 1 || x₊ < -1) && return 1:0
+    θ₋, θ₊ = acos(min(x₊, 1.0)), acos(max(x₋, -1.0))         # θ is decreasing in x
+    j₋ = max(0, floor(Int, M * θ₋ / π - 1 / 2) - 1)
+    j₊ = min(M - 1, ceil(Int, M * θ₊ / π - 1 / 2) + 1)
+    return j₋:j₊
+end
+
+function kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E, K::Gaussian)
+    P = length(μ)
+    M = gaussian_nodes(P)
+    windows = [gaussian_window(s, K.ε, Eᵢ, M) for Eᵢ in E]
+    used = filter(!isempty, windows)
+    # g_j = μ_0 + 2 ∑_{n=1}^{P−1} μ_n T_n(x_j) at the nodes that some energy needs
+    j₋ = isempty(used) ? 0 : minimum(first, used)
+    j₊ = isempty(used) ? -1 : maximum(last, used)
+    g = zeros(j₊ - j₋ + 1)
+    for j in j₋:j₊
+        x = cospi((j + 1 / 2) / M)
+        T₀, T₁ = one(x), x
+        total = 0.0
+        for n in 2:P
+            total += μ[n] * T₁
+            T₀, T₁ = T₁, 2x * T₁ - T₀
+        end
+        g[j-j₋+1] = μ[1] + 2total
+    end
+    for (i, Eᵢ) in enumerate(E)
+        total = 0.0
+        for j in windows[i]
+            total += K(Eᵢ, cospi((j + 1 / 2) / M) / s) * g[j-j₋+1]
+        end
+        ρ[i] = total / M
+    end
+    return ρ
+end
+
+"""
     truncation_bound(K::DeltaChebyshev, s, E, P) -> b
 
 A bound for the terms n ≥ P that [`kpm_density`](@ref) with the kernel `K` leaves out, per unit of
@@ -222,6 +327,55 @@ function truncation_bound(K::DeltaChebyshev, s::Real, E::Real, P::Integer)
 end
 
 truncation_bound(K::DeltaChebyshev, s::Real, E, P::Integer) = [truncation_bound(K, s, Eᵢ, P) for Eᵢ in E]
+
+"""
+    gaussian_tail_bound(s, ε, E, P) -> R
+
+The bound R_P(E) ≥ ∑_{n≥P} |c_n(E)| of Proposition 5 of the KPM error note (16 November 2026,
+revised 18 November), for |sE| < 1 (otherwise, and when the formula overflows, `Inf`):
+
+    R_P(E) = (2s/π) [2/(cosh(Ps²ε²) √((1 − |sE|)(3 + |sE|))) + (√(π/2)/(sε)) exp(−(1 − |sE|)²/(8s²ε²))]
+             × 1/(1 − exp(−Ps²ε²)) × exp(sinh²(Ps²ε²)/(2s²ε²) − P²s²ε²).
+"""
+function gaussian_tail_bound(s::Real, ε::Real, E::Real, P::Integer)
+    abs(s * E) < 1 || return Inf
+    sE = abs(s * E)
+    Ps²ε² = P * s^2 * ε^2
+    bracket = 2 / (cosh(Ps²ε²) * sqrt((1 - sE) * (3 + sE))) +
+              sqrt(π / 2) / (s * ε) * exp(-(1 - sE)^2 / (8 * s^2 * ε^2))
+    R = 2s / π * bracket / (-expm1(-Ps²ε²)) * exp(sinh(Ps²ε²)^2 / (2 * s^2 * ε^2) - Float64(P)^2 * s^2 * ε^2)
+    return isnan(R) ? Inf : R                  # 0 × Inf when cosh and sinh overflow: no bound
+end
+
+"""
+    truncation_bound(K::Gaussian, s, E, P) -> b
+
+A bound for the difference between ∑_c a_c [δ_ε(E − A)]_{cc} and the density from P moments of
+[`kpm_density`](@ref) with the kernel `K = Gaussian(ε)`, per unit of μ_0, for weights a_c ≥ 0 and
+σ(sA) ⊂ [−1, 1] (so |μ_n| ≤ μ_0). Two parts:
+
+- the terms n ≥ P that are left out, at most ∑_{n≥P} |c_n(E)|;
+- the sampling of δ_ε at M = 2P nodes: the computed coefficients are c̃_n = c_n + ∑_{k≥1} (−1)^k
+  (c_{2kM−n} + c_{2kM+n}), so ∑_{n<P} |c̃_n − c_n| ≤ ∑_{m>3P} |c_m| (Remark 7(i) of the note).
+
+Each tail ∑_{n≥Q} |c_n(E)| is bounded by R_{Q′}(E) of Proposition 5 ([`gaussian_tail_bound`](@ref))
+for any Q′ ≤ Q, because the tail decreases with Q; R grows with Q′ once Q′s²ε² exceeds about 1.1,
+so the smaller of R_Q and R_{Q′} with Q′ = min(Q, ⌊1.09/(s²ε²)⌋) is used. `b` has the unit 1/eV and
+is `Inf` for |sE| ≥ 1, where Proposition 5 does not apply; for a collection `E` it has one entry
+per energy. For the momentum LDoS (4.36), μ_0/6 ≤ 1; for the densities of states, μ_0 is the field
+`mass` of the result. The bound is for exact moments; it does not include the rounding errors of
+the recurrence (Remark 7(iii) of the note: about 0.51 Δμ/ε for errors Δμ in the moments).
+"""
+function truncation_bound(K::Gaussian, s::Real, E::Real, P::Integer)
+    P ≥ 1 || throw(ArgumentError("P must be a positive integer"))
+    ε = K.ε
+    Q′(Q) = Int(min(Q, max(1.0, floor(1.09 / (s^2 * ε^2)))))
+    tail(Q) = min(gaussian_tail_bound(s, ε, E, Q), gaussian_tail_bound(s, ε, E, Q′(Q)))
+    left_out = tail(P)
+    return left_out + min(left_out, tail(3P + 1))
+end
+
+truncation_bound(K::Gaussian, s::Real, E, P::Integer) = [truncation_bound(K, s, Eᵢ, P) for Eᵢ in E]
 
 """
     chebyshev_moments(H̃, orbitals, P) -> μ

@@ -30,7 +30,8 @@ using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
 # used here, so this file can be included on its own.
 #
 # The keyword `kernel` of `choose_W` and `sweep_L` selects the regularisation of the LDoS that is
-# compared: `Jackson()` (default, as described above) or `DeltaChebyshev(η, m)` (arXiv:2512.03149).
+# compared: `Jackson()` (default, as described above), `DeltaChebyshev(η, m)` (arXiv:2512.03149) or
+# `Gaussian(ε)` (the Gaussian δ_ε expanded in Chebyshev polynomials).
 
 include(joinpath(@__DIR__, "kernel_argument.jl"))            # kernel_text
 

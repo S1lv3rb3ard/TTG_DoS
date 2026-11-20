@@ -43,12 +43,18 @@ the analytic refit of its threefold and sixfold terms, whose Fourier transform d
 Gaussian, is `Model(stack; τ = 8.5, δ = 6.5, interlayer = :analytic_refit)`.
 
 The same moments can be evaluated with the high-order delta-Chebyshev kernel of arXiv:2512.03149
-instead of the Jackson kernel (keyword `kernel` of `kpm_density`, `momentum_ldos`, `moire_dos`,
+or with a Gaussian instead of the Jackson kernel (keyword `kernel` of `kpm_density`, `momentum_ldos`, `moire_dos`,
 `brillouin_dos`; the default `Jackson()` is the method of the manuscript):
 
     K      = DeltaChebyshev(0.03, 6)                      # η = 30 meV ≈ 15/(sP), order m = 6
     F      = kpm_density(μ, s, range(-0.2, 0.2; length = 401); kernel = K) ./ 6
     b      = truncation_bound(K, s, range(-0.2, 0.2; length = 401), length(μ))   # are P moments enough for this η?
+
+or with the Gaussian δ_ε of Section 2.5 itself, expanded in Chebyshev polynomials (the
+regularisation of the error estimate; width ε independent of P, P sε ≥ 4 recommended):
+
+    K      = Gaussian(4 / (s * length(μ)))                # ε = 4/(sP)
+    F      = kpm_density(μ, s, range(-0.2, 0.2; length = 401); kernel = K) ./ 6
 
 (here every zero label is in the window; in general keep only those with `zero_label(window, t) > 0`,
 convention (4.10)). `examples/production_linecut_gpu.jl` does this for a whole line cut, and
@@ -74,7 +80,7 @@ include("interlayer.jl")      # Fang–Kaxiras hopping, its analytic refit, and 
 include("window.jl")          # labels, W- and L-truncation, connectedness search
 include("hamiltonian.jl")     # Model and the assembly of Ĥ_q^{(τ,W,L)}
 include("reference.jl")       # slow reference implementations for tests
-include("kpm.jl")             # Chebyshev moments; densities with the Jackson or the delta-Chebyshev kernel
+include("kpm.jl")             # Chebyshev moments; densities with the Jackson, delta-Chebyshev or Gaussian kernel
 include("sell.jl")            # reachable rows and sliced ELLPACK storage for the GPU recurrence
 include("parameters.jl")     # angle triples of Section 5, output folders of the drivers
 include("dos.jl")             # momentum LDoS, Brillouin-zone and moiré-cell DoS
@@ -91,7 +97,7 @@ export Model, hamiltonian, interlayer_entry, neighbours, interlayer_row_sum, spe
 export ANGLE_SETS, triple_parameters, claim_directory
 export reference_hamiltonian, reference_fourier_hopping, reference_bloch, gaussian_density, reference_moments
 export jackson, kpm_density, kpm_density!, chebyshev_moments, kpm_resolution, gpu_matrix
-export Jackson, DeltaChebyshev, truncation_bound
+export Jackson, DeltaChebyshev, Gaussian, truncation_bound
 export SlicedELL, reachable
 export Linecut, linecut, momentum_ldos, moire_cell, moire_dos, brillouin_dos
 export Boundary, boundary, transfer_norm, flux_bound, escape_norm, posteriori_bound, bracket_bound

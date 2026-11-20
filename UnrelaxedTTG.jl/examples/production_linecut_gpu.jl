@@ -35,7 +35,8 @@ momentum q of the path:
 The LDoS is recovered afterwards as `kpm_density(μ, s, E) ./ 6` with the `s` of `meta.txt`
 (the division by six, not by the number of orbitals present, is the convention (4.10)). The moments
 do not depend on the regularisation kernel: `kpm_density(μ, s, E; kernel = DeltaChebyshev(η, m)) ./ 6`
-evaluates the same files with the delta-Chebyshev kernel of arXiv:2512.03149.
+evaluates the same files with the delta-Chebyshev kernel of arXiv:2512.03149, and
+`kpm_density(μ, s, E; kernel = Gaussian(ε)) ./ 6` with the Gaussian δ_ε of width ε.
 
 Keyword arguments:
 
