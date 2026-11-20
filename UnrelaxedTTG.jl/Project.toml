@@ -1,7 +1,7 @@
 name = "UnrelaxedTTG"
 uuid = "6b1f3c52-7a0e-4d59-9a3b-2f4e8c1d7a90"
 authors = ["Ken Beard", "Daniel Massatt"]
-version = "0.6.0"
+version = "0.6.1"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"

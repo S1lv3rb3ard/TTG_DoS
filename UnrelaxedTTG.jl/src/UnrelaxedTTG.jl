@@ -87,7 +87,7 @@ export Shells, jung_macdonald, bloch, dirac_energy, intralayer_bound, band_gap
 export InterlayerModel, InterlayerParameters, FANG_KAXIRAS, AnalyticRefit, ANALYTIC_REFIT, ANALYTIC_REFIT_6_7, INTERLAYER_MODELS, DEFAULT_INTERLAYER, interlayer_model
 export interlayer_hopping, closed_form_hankel, HankelTable, hankel, fourier_hopping
 export Label, Window, zero_label, shifted_momentum, momentum, dimension, orbitals, search_window
-export Model, hamiltonian, interlayer_entry, neighbours, interlayer_row_sum, spectral_bound
+export Model, hamiltonian, interlayer_entry, neighbours, interlayer_row_sum, spectral_bound, restrict
 export ANGLE_SETS, triple_parameters, claim_directory
 export reference_hamiltonian, reference_fourier_hopping, reference_bloch, gaussian_density, reference_moments
 export jackson, kpm_density, kpm_density!, chebyshev_moments, kpm_resolution, gpu_matrix

@@ -23,7 +23,7 @@ G = (G_s)_{s≠t} with G_s = B_s m_s, m_s ∈ ℤ². A label has the momentum k_
 | Window (4.8), (4.27) | ‖ζ(x)‖₂ < W_t and max(‖G_k‖₂, ‖G_l‖₂) < L_t, with ζ(x) = q − K̃_t + ∑_{s≠t}(B_s − B_t) m_s (4.7) | `Window(stack, q, W, L)` |
 | Intralayer block (2.4) | h̃_t(k_x) − E_D | `bloch` |
 | Interlayer entry (3.5), (4.4) | c_j c_k g_τ(p) e^{i(G′_j·τ_{jα} − G_k·τ_{kβ})} ĥ_{kβ}^{jα}(p), p = k_x + G′_j | `neighbours`, `interlayer_entry`, `fourier_hopping` |
-| Truncated Hamiltonian | Ĥ_q^{(τ,W,L)}, sparse and exactly Hermitian | `hamiltonian(model, window)` |
+| Truncated Hamiltonian | Ĥ_q^{(τ,W,L)}, sparse and exactly Hermitian | `hamiltonian(model, window)`; `restrict` gives the one of a smaller (W, L) as a submatrix |
 | Bound (4.35) | B_H ≥ ‖Ĥ_q^{(τ,W,L)}‖₂ | `spectral_bound(model)`, `spectral_bound(model, W)` |
 | Chebyshev moments | μ_n = ∑_c [T_n(sĤ_q)]_cc, s = (1 − δ_s)/B_H | `chebyshev_moments` (CPU and GPU), `SlicedELL`, `reachable` |
 | KPM density (4.33), (4.34) | s/(π√(1 − (sE)²)) ∑_n g_n^P μ_n T_n(sE) | `kpm_density`, `jackson` (kernel `Jackson()`, the default) |
@@ -54,7 +54,7 @@ src/posteriori.jl       a posteriori diagnostics of the truncation
 src/reference.jl        slow reference implementations used by the tests
 ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on the GPU: kernel on SlicedELL, and CUSPARSE (loaded with CUDA.jl)
 examples/               drivers, see below
-test/runtests.jl        7127 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
+test/runtests.jl        7175 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
 ```
 
 ## Installation
@@ -271,6 +271,15 @@ W_ref, all at the same L, P, arithmetic and KPM scale, together with the differe
 production arithmetic and double precision with the full matrix (the floor). `choose_W` returns
 the smallest W whose difference, and that of every larger candidate, is at most the floor;
 `sweep_L` does the same comparison in L. No tolerance is prescribed.
+
+Only the reference matrix is assembled at each momentum. For (W, L) ≤ (W_ref, L) the window is a
+subset of the reference window (the conditions ‖ζ(x)‖ < W_t and label size < L_t only get stricter,
+and K̃_t depends on q alone), and every entry depends only on q and its two labels. So the matrix of
+a candidate is the principal submatrix of the reference on the labels that satisfy the smaller
+bounds, `restrict(stack, window, H_ref, W, L)`; it is equal to `hamiltonian(model, Window(stack, q, W, L))`
+entry for entry (tested). `sweep_L` does the same with (W, L_ref). For the next `ahead` momenta
+(default 3) the reference matrix, its submatrices and their GPU format are prepared on CPU threads
+while the GPU runs the recurrence of the current momentum.
 
 ```julia
 using CUDA

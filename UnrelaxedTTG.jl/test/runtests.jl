@@ -324,6 +324,19 @@ end
     @test norm(Matrix(H) - Href) < 1e-11
     @test norm(Href - Href') < 1e-12
     @test count(!iszero, Href) == count(!iszero, Matrix(H))
+    # nested windows: the truncation to a smaller (W, L) is a principal submatrix (`restrict`)
+    for q′ in (q, stack.K[1] + SVector(-0.03, 0.01), stack.K[3] + SVector(0.25, -0.1))
+        big = Window(stack, q′, 0.25, 4.0)
+        H_big = hamiltonian(model, big)
+        for (W, L) in ((0.25, 4.0), (0.2, 4.0), (0.25, 3.0), (0.12, 2.5), ((0.2, 0.15, 0.25), (3.5, 4.0, 2.0)))
+            small = Window(stack, q′, W, L)
+            H′, present, n = restrict(stack, big, H_big, W, L)
+            @test n == length(small)
+            @test H′ == hamiltonian(model, small)
+            @test present == [o for t in 1:3 for o in orbitals(zero_label(small, t)) if zero_label(small, t) > 0]
+        end
+        @test_throws ArgumentError restrict(stack, big, H_big, 0.3, 4.0)
+    end
     # `hamiltonian` computes each interlayer block from its lower layer; the blocks computed
     # from the two ends agree (Hermiticity of (3.5))
     for (s, x) in enumerate(window.labels)

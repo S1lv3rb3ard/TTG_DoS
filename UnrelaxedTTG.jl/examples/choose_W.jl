@@ -16,6 +16,13 @@
 # candidate differ from W_ref by no more than this floor, that is, the smallest W for which the
 # W-truncation is not the largest of the measured differences. No tolerance is prescribed; if no
 # candidate qualifies, `W_ref` is returned. The L- and P-dependence are not part of the sweep.
+#
+# Per momentum only the reference matrix (W_ref, L) is assembled; every candidate is its principal
+# submatrix on the labels of the smaller window (`restrict`, exact: the windows are nested and the
+# entries do not depend on W or L). For the next `ahead` momenta (default 3) the reference matrix,
+# the submatrices and their GPU format are prepared on CPU threads while the GPU works on the
+# current momentum. `sweep_L` does the same with
+# the reference (W, L_ref).
 
 using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
 
@@ -43,15 +50,25 @@ function build(model, q, W, L)
 end
 
 """
+    gpu_format(H, present, s, B_H; precision, drop) -> S
+
+The matrix of the recurrence on the CPU side: the entries with |h| ≤ `drop` (eV) removed, scaled to
+s(H − c) with the scale s and the shift of `scaled`, in the sliced ELLPACK format with the rows
+reachable from the zero-label orbitals `present` (`SlicedELL`), in the arithmetic `precision`.
+"""
+gpu_format(H, present, s, B_H; precision = ComplexF32, drop = 1e-5) =
+    SlicedELL(UnrelaxedTTG.scaled(drop > 0 ? droptol!(copy(H), drop) : H, s, B_H), precision; reach = present)
+
+"""
     gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel = Jackson()) -> (F, seconds, μ)
+    gpu_ldos(S::SlicedELL, present, s, P; E, kernel = Jackson()) -> (F, seconds, μ)
 
 F(E) = (1/6) ∑ over the zero-label orbitals of [δ^P_KPM(E, H)]_cc (or of the kernel `kernel`) on the energies E, from moments
-computed on the GPU at the scale s after removing the entries with |h| ≤ drop (eV). `seconds` is
-the time of the upload and the recurrence.
+computed on the GPU at the scale s after removing the entries with |h| ≤ drop (eV). The second
+form takes the matrix already in the GPU format (`gpu_format`). `seconds` is the time of the
+upload and the recurrence.
 """
-function gpu_ldos(H, present, s, B_H, P; precision = ComplexF32, drop = 1e-5, E, kernel = Jackson())
-    drop > 0 && (H = droptol!(copy(H), drop))
-    S = SlicedELL(UnrelaxedTTG.scaled(H, s, B_H), precision; reach = present)   # rows reachable from the zero labels
+function gpu_ldos(S::SlicedELL, present, s, P; E, kernel = Jackson())
     t = time()
     H̃ = gpu_matrix(S)
     μ = chebyshev_moments(H̃, present, P)
@@ -59,9 +76,51 @@ function gpu_ldos(H, present, s, B_H, P; precision = ComplexF32, drop = 1e-5, E,
     seconds = time() - t
     return kpm_density(μ, s, E; kernel) ./ 6, seconds, μ
 end
+gpu_ldos(H, present, s, B_H, P; precision = ComplexF32, drop = 1e-5, E, kernel = Jackson()) =
+    gpu_ldos(gpu_format(H, present, s, B_H; precision, drop), present, s, P; E, kernel)
 
-"""The matrices of one momentum for several (W, L), assembled on parallel CPU threads."""
-build_all(model, q, configurations) = fetch.([Threads.@spawn build(model, q, W, L) for (W, L) in configurations])
+zero_orbitals(window) = [o for t in 1:3 for o in orbitals(zero_label(window, t)) if zero_label(window, t) > 0]
+
+"""
+    prepared_ahead(prepare, items; ahead = 3) -> next
+
+Runs `prepare(item)` for the items in order on CPU threads, up to `ahead` items in advance, so
+that the CPU work (assembly of the reference matrix, the submatrices of the smaller windows and
+their GPU format) overlaps with the GPU work on the current item. Each call `next()` returns the
+result for the next item.
+"""
+function prepared_ahead(prepare, items; ahead::Int = 3)
+    items = collect(items)
+    tasks = Any[nothing for _ in items]
+    spawn(c) = c ≤ length(items) && (tasks[c] = Threads.@spawn prepare(items[c]))
+    foreach(spawn, 1:max(ahead, 1))
+    count = Ref(0)
+    return function next()
+        c = count[] += 1
+        result = fetch(tasks[c]); tasks[c] = nothing
+        spawn(c + max(ahead, 1))
+        return result
+    end
+end
+
+"""
+    reference_and_restrictions(model, q, W, L, smaller; s, B_H, precision, drop, keep) -> prepared
+
+Assembles Ĥ_q at (W, L) once and returns, in the GPU format, it and its restrictions to the windows
+(W′, L′) in `smaller` (`restrict`): `prepared.reference = (S, present, labels)`,
+`prepared.smaller[k] = (S, present, labels)`, and `prepared.H` = the assembled matrix if `keep`.
+"""
+function reference_and_restrictions(model, q, W, L, smaller; s, B_H, precision, drop, keep::Bool = false)
+    window = Window(model.stack, q, W, L)
+    H = hamiltonian(model, window)
+    present = zero_orbitals(window)
+    reference = (gpu_format(H, present, s, B_H; precision, drop), present, length(window))
+    restricted = map(smaller) do (W′, L′)
+        H′, present′, labels′ = restrict(model.stack, window, H, W′, L′)
+        (gpu_format(H′, present′, s, B_H; precision, drop), present′, labels′)
+    end
+    return (; reference, smaller = restricted, H = keep ? H : nothing, present)
+end
 
 """
     choose_W(; set, L, P, candidates, W_ref, Nq, momenta, floor_momenta, precision, drop, E, log, directory) -> result
@@ -85,7 +144,8 @@ Keyword arguments: `set` (angle triple, `triple_parameters`); `L`, `P`; `candida
 than `W_ref`); `W_ref`; `Nq` (default 60); `momenta` (default every 30th point); `floor_momenta`
 (default the first and the middle one of `momenta`); `precision` (default `ComplexF32`); `drop`
 (eV, default 10⁻⁵); `E` (default 4001 points of [−0.2, 0.2] eV); `log`; `directory` (if given, the
-moments `mu_W<W>_q<index>.bin` and a `meta.txt` are written there).
+moments `mu_W<W>_q<index>.bin` and a `meta.txt` are written there); `ahead` (default 3, momenta prepared in
+advance on CPU threads).
 
 `result` is a named tuple: `choice`, `floor`, `floor_values` (per momentum), `Ws` (sorted
 candidates), `W_ref`, `momenta`, `difference` (candidates × momenta), `labels` and `seconds`
@@ -96,7 +156,7 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
                   momenta = 1:30:(5Nq + 1), floor_momenta = (first(momenta), momenta[cld(length(momenta), 2)]),
                   precision::Type = ComplexF32, drop::Real = 1e-5,
                   E = range(-0.2, 0.2; length = 4001), log::IO = stdout, directory = nothing, kernel = Jackson(),
-                  interlayer::Symbol = DEFAULT_INTERLAYER)
+                  interlayer::Symbol = DEFAULT_INTERLAYER, ahead::Int = 3)
     θ = triple_parameters(set)[1]
     stack = Stack(1.42 * √3, θ)
     model = Model(stack; τ = 8.5, δ = 6.5, interlayer)
@@ -114,19 +174,22 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
     moments = directory === nothing ? nothing : Dict{Tuple{Float64,Int},Vector{Float64}}()
     floor_values = Dict{Int,Float64}()
     all(in(momenta), floor_momenta) || throw(ArgumentError("floor_momenta must be among momenta"))
+    prepare(i) = reference_and_restrictions(model, path.q[i], W_ref, L, [(W, L) for W in Ws];
+                                            s, B_H, precision, drop, keep = i in floor_momenta)
+    next_prepared = prepared_ahead(prepare, momenta; ahead)   # Ĥ_q at (W_ref, L); the candidates are its submatrices
     for (column, i) in enumerate(momenta)
-        built = build_all(model, path.q[i], [(W, L) for W in [Ws; W_ref]])
-        H, present, labels[end, column] = built[end]
-        F_ref, seconds[end, column], μ = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
+        prepared = next_prepared()
+        S, present, labels[end, column] = prepared.reference
+        F_ref, seconds[end, column], μ = gpu_ldos(S, present, s, P; E, kernel)
         moments === nothing || (moments[(W_ref, i)] = μ)
         if i in floor_momenta
-            F₆₄, = gpu_ldos(H, present, s, B_H, P; precision = ComplexF64, drop = 0.0, E, kernel)
+            F₆₄, = gpu_ldos(prepared.H, present, s, B_H, P; precision = ComplexF64, drop = 0.0, E, kernel)
             floor_values[i] = relative_difference(F_ref, F₆₄)
         end
         line = @sprintf("q %4d:", i)
         for (row, W) in enumerate(Ws)
-            H, present, labels[row, column] = built[row]
-            F, seconds[row, column], μ = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
+            S, present, labels[row, column] = prepared.smaller[row]
+            F, seconds[row, column], μ = gpu_ldos(S, present, s, P; E, kernel)
             moments === nothing || (moments[(W, i)] = μ)
             difference[row, column] = relative_difference(F, F_ref)
             line *= @sprintf(" W = %.3f: %.1e (%d labels, %.1f s);", W, difference[row, column], labels[row, column], seconds[row, column])
@@ -170,7 +233,7 @@ momenta `momenta` of the line cut, at the common scale s = 0.95/B_H (pass the B_
 """
 function sweep_L(; set::Int, W::Real, Ls, L_ref::Real, P::Int, B_H::Real, Nq::Int = 60, momenta = 1:60:(5Nq + 1),
                  precision::Type = ComplexF32, drop::Real = 1e-5, E = range(-0.2, 0.2; length = 4001), log::IO = stdout,
-                 kernel = Jackson(), interlayer::Symbol = DEFAULT_INTERLAYER)
+                 kernel = Jackson(), interlayer::Symbol = DEFAULT_INTERLAYER, ahead::Int = 3)
     θ = triple_parameters(set)[1]
     stack = Stack(1.42 * √3, θ)
     model = Model(stack; τ = 8.5, δ = 6.5, interlayer)
@@ -183,14 +246,16 @@ function sweep_L(; set::Int, W::Real, Ls, L_ref::Real, P::Int, B_H::Real, Nq::In
     difference = zeros(length(Ls), length(momenta))
     labels = zeros(Int, length(Ls) + 1, length(momenta))
     seconds = zeros(length(Ls) + 1, length(momenta))
+    prepare(i) = reference_and_restrictions(model, path.q[i], W, L_ref, [(W, L) for L in Ls]; s, B_H, precision, drop)
+    next_prepared = prepared_ahead(prepare, momenta; ahead)   # Ĥ_q at (W, L_ref); the candidates are its submatrices
     for (column, i) in enumerate(momenta)
-        built = build_all(model, path.q[i], [(W, L) for L in [Ls; L_ref]])
-        H, present, labels[end, column] = built[end]
-        F_ref, seconds[end, column] = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
+        prepared = next_prepared()
+        S, present, labels[end, column] = prepared.reference
+        F_ref, seconds[end, column] = gpu_ldos(S, present, s, P; E, kernel)
         line = @sprintf("q %4d:", i)
         for (row, L) in enumerate(Ls)
-            H, present, labels[row, column] = built[row]
-            F, seconds[row, column] = gpu_ldos(H, present, s, B_H, P; precision, drop, E, kernel)
+            S, present, labels[row, column] = prepared.smaller[row]
+            F, seconds[row, column] = gpu_ldos(S, present, s, P; E, kernel)
             difference[row, column] = relative_difference(F, F_ref)
             line *= @sprintf(" L = %.2f: %.1e (%d labels, %.1f s);", L, difference[row, column], labels[row, column], seconds[row, column])
         end

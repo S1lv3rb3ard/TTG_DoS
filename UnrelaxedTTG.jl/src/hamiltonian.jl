@@ -194,6 +194,31 @@ function hamiltonian(model::Model{T}, window::Window{T}) where {T}
 end
 
 """
+    restrict(stack, window, H, W, L) -> (H′, present, labels)
+
+The truncation Ĥ_q^{(τ,W,L)} for W ≤ `window.W` and L ≤ `window.L` (per layer) as a principal
+submatrix of `H` = Ĥ_q of `window`, without assembling it again. This is exact: the labels of
+the window (W, L) are those of `window` with ‖ζ(x)‖₂ < W_t and max(‖G_k‖₂, ‖G_l‖₂) < L_t
+(eqs. (4.8), (4.27)), at the same Dirac points K̃_t (which depend on q only), so the smaller
+window is a subset of the larger one; and every entry of Ĥ_q depends only on q and its two
+labels, not on W or L. The labels keep their order, so `H′` equals `hamiltonian(model,
+Window(stack, q, W, L))` entry for entry (tested). `present` holds the orbital indices of the
+zero labels in the smaller window, `labels` its number of labels.
+"""
+function restrict(stack, window, H, W, L)
+    W, L = triple(eltype(window.W), W), triple(eltype(window.L), L)
+    all(W .≤ window.W) && all(L .≤ window.L) || throw(ArgumentError("(W, L) must not exceed the window's"))
+    keep = [s for (s, x) in enumerate(window.labels)
+            if norm(window.ζ[s]) < W[x.layer] && label_size(stack, x) < L[x.layer]]
+    position = zeros(Int, length(window))
+    position[keep] = eachindex(keep)
+    rows = [o for s in keep for o in orbitals(s)]
+    zero = [position[s] for s in (zero_label(window, t) for t in 1:3) if s > 0]   # zero labels in the smaller window
+    present = [o for p in zero if p > 0 for o in orbitals(p)]
+    return H[rows, rows], present, length(keep)
+end
+
+"""
     interlayer_row_sum(model, a, k) -> SVector{2}
 
 Absolute row sums ∑_y |[Ĥ^τ_{q,inter}]_{(x,α),y}|, α = A, B, of the untruncated
