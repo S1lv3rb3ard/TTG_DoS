@@ -33,7 +33,8 @@ G = (G_s)_{s≠t} with G_s = B_s m_s, m_s ∈ ℤ². A label has the momentum k_
 | A posteriori diagnostics | Lemma 4.4, Remark 4.5, Lemma C.4 | `flux_bound`, `transfer_norm` (dense, small windows) |
 
 The intralayer model is Jung–MacDonald (PRB 87, 195450) with the Dirac energy subtracted; the
-interlayer model is Fang–Kaxiras (PRB 93, 235153), Fourier transformed numerically (F.8).
+interlayer model is Fang–Kaxiras (PRB 93, 235153), Fourier transformed numerically (F.8), or, as an
+option, its analytic refit (see "Choice of the interlayer model").
 
 ## Files
 
@@ -42,7 +43,7 @@ src/UnrelaxedTTG.jl     module, exports
 src/geometry.jl         Stack: lattices A_j, B_j, Dirac points, nearest_dirac, connectedness_range
 src/quadrature.jl       Gauss–Legendre, polar rule, momentum cutoff g_τ (4.4)
 src/intralayer.jl       neighbour shells, Bloch matrix (2.4), Dirac energy, band gap (4.24)
-src/interlayer.jl       hopping (F.5), Hankel table and Fourier transform (F.8)
+src/interlayer.jl       hopping (F.5) with the models FANG_KAXIRAS, ANALYTIC_REFIT, ANALYTIC_REFIT_6_7, Hankel table and Fourier transform (F.8)
 src/window.jl           Label, Window (direct enumeration), search_window (Theorem 4.3(b))
 src/hamiltonian.jl      Model, hamiltonian, spectral_bound
 src/parameters.jl       ANGLE_SETS, triple_parameters (angle triples with their W and L), claim_directory
@@ -53,7 +54,7 @@ src/posteriori.jl       a posteriori diagnostics of the truncation
 src/reference.jl        slow reference implementations used by the tests
 ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on the GPU: kernel on SlicedELL, and CUSPARSE (loaded with CUDA.jl)
 examples/               drivers, see below
-test/runtests.jl        6891 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
+test/runtests.jl        7127 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
 ```
 
 ## Installation
@@ -154,6 +155,53 @@ s = 0.2321 eV⁻¹; `truncation_bound` and the largest difference of the LDoS be
 The order of convergence is tested on a density with known moments (the semicircle density, test
 set "delta-Chebyshev kernel"): orders 1, 2, 4, 4, 6, 6 for m = 1, …, 6 in η, and 2 in 1/P for Jackson.
 The total density of states, where the density is smooth, has not been run with this kernel.
+
+## Choice of the interlayer model: Fang–Kaxiras or the analytic refit
+
+The hopping between layers is h(x) = V₀(r) + V₃(r)Θ₃(x̂) + V₆(r)Θ₆(x̂), r = ‖x‖₂/a (F.5). Three radial
+models are available; the angular factors Θ₃, Θ₆ are the same for all. The default
+(`DEFAULT_INTERLAYER`) is the refit of orders (6, 7), the model adopted for the manuscript on
+20 November 2026; until version 0.5 it was Fang–Kaxiras.
+
+| name | constant | V₃, V₆ | Fourier transform |
+|---|---|---|---|
+| `:fang_kaxiras` | `FANG_KAXIRAS` | the functions (F.6) of Fang & Kaxiras | decays like ‖ξ‖⁻³ (not smooth at r = 0) |
+| `:analytic_refit` | `ANALYTIC_REFIT` | r^m e^{−β_m r²/2} Σ_j v_{m,j} L_j^{(m)}(β_m r²), m = 3, 6, orders (2, 3) | decays like a Gaussian; closed form `closed_form_hankel` |
+| `:analytic_refit_6_7` (default) | `ANALYTIC_REFIT_6_7` | the same form, orders (6, 7) | decays like a Gaussian, more slowly; closed form |
+
+The refit keeps V₀ and replaces V₃ (3 coefficients, β₃ = 6.2595) and V₆ (4 coefficients,
+β₆ = 3.9995) by their L²(r dr)-best approximations of this analytic form (note "A refit of the
+Fang–Kaxiras interlayer hopping with a Gaussian-decaying Fourier transform", 17 November 2026). It
+changes V₃ by at most 0.33 meV and V₆ by at most 0.061 meV, the coupling at the Dirac point from
+104.01 to 103.95 meV, and the interlayer block of one pair of layers by about 0.9 meV in operator
+norm. It is a fit to the published Fang–Kaxiras functions, not to DFT data.
+
+`ANALYTIC_REFIT_6_7` is the refit of the same kind with 7 and 8 coefficients (β₃ = 8.6136,
+β₆ = 5.3768). It changes V₃ by at most 0.158 meV and V₆ by at most 0.029 meV; on the production
+windows the Hamiltonian changes by about 0.06 meV and the momentum LDoS by at most about 0.25 %
+(report of 18 November 2026, Section 3). The price is a slower Gaussian decay of the transform,
+exp(−ρ²a²/(2β₃)) with β₃ = 8.6136 instead of 6.2595. `AnalyticRefit` takes any number of
+coefficients, and `linecut_gpu(…; interlayer = AnalyticRefit(…))` accepts a model object; its
+meta.txt then holds the object with all parameters.
+
+```julia
+model  = Model(stack; τ = 8.5, δ = 6.5)                              # refit (6, 7), the default
+FK     = Model(stack; τ = 8.5, δ = 6.5, interlayer = :fang_kaxiras)   # or parameters = FANG_KAXIRAS
+model.interlayer                                                     # the radial model in use
+```
+
+The drivers use the default and take another model by name: `linecut_gpu(…; interlayer = :fang_kaxiras)`,
+`choose_W(…; interlayer)`, `sweep_L(…; interlayer)`, and the argument `interlayer=fang_kaxiras` of
+`production_linecut.jl`, `ldos_convergence.jl`, `ldos_linecut.jl` and `moire_dos.jl`
+(`ldos_linecut.jl … legacy` keeps Fang–Kaxiras, the MATLAB model). A run with a refit writes the line
+`interlayer <name>` (e.g. `interlayer analytic_refit_6_7`) into its meta.txt; a Fang–Kaxiras run writes
+no such line, so its meta.txt is the same as before version 0.6.0 and older runs resume. To resume an
+older Fang–Kaxiras run, pass `interlayer = :fang_kaxiras`; with the new default the meta.txt differs
+and the driver stops instead of mixing models. Because
+`claim_directory` compares meta.txt line by line, the moments of the two models cannot end up in one
+folder. `ldos_from_moments.jl` needs no argument: the moments already belong to one model.
+`examples/compare_interlayer.jl` compares the two models (transforms, Hamiltonian, LDoS of two line
+cuts).
 
 ## Line cut on a GPU
 
@@ -277,10 +325,11 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
 | `production_linecut.jl` | CPU line cut with the same files as the GPU driver |
 | `ldos_convergence.jl` | W- and L-convergence of the LDoS at ten momenta (CPU) |
 | `ldos_from_moments.jl` | LDoS table from a folder of moments, with either kernel |
-| `kernel_argument.jl` | the arguments `eta=<η>` and `m=<order>` of `ldos_linecut.jl`, `ldos_from_moments.jl`, `moire_dos.jl` (delta-Chebyshev kernel) |
+| `kernel_argument.jl` | the arguments `eta=<η>` and `m=<order>` of `ldos_linecut.jl`, `ldos_from_moments.jl`, `moire_dos.jl` (delta-Chebyshev kernel), and `interlayer=<name>` of the CPU scripts |
 | `moire_dos.jl` | density of states by the moiré-cell rule (4.39) |
 | `posteriori.jl` | a posteriori diagnostics of Lemma 4.4 |
 | `cross_check_relaxed.jl` | comparison with `RelaxedTTG.jl` at zero relaxation |
+| `compare_interlayer.jl` | Fang–Kaxiras against the analytic refit: transforms, ‖ΔĤ_q‖, LDoS of two line cuts |
 
 ## Conventions
 

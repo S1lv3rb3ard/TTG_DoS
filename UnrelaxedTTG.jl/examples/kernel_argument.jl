@@ -1,4 +1,5 @@
-# Choice of the regularisation kernel on the command line of the example scripts.
+# Choice of the regularisation kernel and of the interlayer model on the command line of the
+# example scripts.
 
 using UnrelaxedTTG, Printf
 
@@ -19,6 +20,45 @@ function kernel_argument!(arguments::Vector{String})
     η, m = value("eta"), value("m")
     η === nothing && m !== nothing && throw(ArgumentError("m=$m needs eta=<η in eV>"))
     return η === nothing ? Jackson() : DeltaChebyshev(parse(Float64, η), m === nothing ? 6 : parse(Int, m))
+end
+
+"""
+    interlayer_argument!(arguments) -> name
+
+Removes an argument of the form `interlayer=<name>` from `arguments` and returns the name of the
+interlayer model as a `Symbol` (`:fang_kaxiras`, `:analytic_refit` or `:analytic_refit_6_7`; see
+`UnrelaxedTTG.INTERLAYER_MODELS`), or `default` (`DEFAULT_INTERLAYER`, `:analytic_refit_6_7`) if
+there is none. An unknown name throws.
+"""
+function interlayer_argument!(arguments::Vector{String}; default::Symbol = DEFAULT_INTERLAYER)
+    i = findfirst(startswith("interlayer="), arguments)
+    name = i === nothing ? default : Symbol(split(popat!(arguments, i), '='; limit = 2)[2])
+    interlayer_model(name)                                    # throws for an unknown name
+    return name
+end
+
+"""
+    interlayer_meta(io, name)
+
+Writes the line `interlayer <name>` of a meta.txt, except for `:fang_kaxiras`, so that the meta.txt
+of a Fang–Kaxiras run is the same as before version 0.6.0 and older runs resume. (A meta.txt
+without the line is a Fang–Kaxiras run, whatever the current default.)
+"""
+interlayer_meta(io::IO, name::Symbol) = name === :fang_kaxiras || println(io, "interlayer ", name)
+
+# A model object: for a model of `INTERLAYER_MODELS` the same line as for its name (none for
+# `FANG_KAXIRAS`), otherwise the object with all its parameters.
+function interlayer_meta(io::IO, p::InterlayerModel)
+    name = findfirst(==(p), INTERLAYER_MODELS)
+    name === nothing ? println(io, "interlayer ", p) : interlayer_meta(io, name)
+end
+
+"""Short name of an interlayer model for logs: the name, or the orders (J₃, J₆) of an `AnalyticRefit`."""
+interlayer_label(name::Symbol) = string(name)
+function interlayer_label(p::InterlayerModel)
+    name = findfirst(==(p), INTERLAYER_MODELS)
+    name !== nothing && return string(name)
+    p isa AnalyticRefit ? "AnalyticRefit of orders ($(length(p.v₃) - 1), $(length(p.v₆) - 1))" : string(typeof(p))
 end
 
 """Text for logs and file headers: the kernel and the parameter that sets its resolution."""

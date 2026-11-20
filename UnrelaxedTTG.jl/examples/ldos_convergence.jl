@@ -1,6 +1,9 @@
 # Convergence of the momentum LDoS in W and L at fixed energy resolution (manuscript, eq. (5.2)).
 #
-#   julia -t auto --project=. examples/ldos_convergence.jl <set> <directory> [budget in seconds] [configurations] [Wmax]
+#   julia -t auto --project=. examples/ldos_convergence.jl <set> <directory> [budget in seconds] [configurations] [Wmax] [interlayer=<name>]
+#
+# The interlayer model is `DEFAULT_INTERLAYER` (the refit of orders (6, 7)); `interlayer=<name>` selects another
+# (`UnrelaxedTTG.INTERLAYER_MODELS`, e.g. `interlayer=fang_kaxiras`).
 #
 # At ten momenta of the path (its vertices and the midpoints of its segments) the moments of the
 # zero-label orbitals are computed for several (W, L), all with the same KPM scale s and the same P,
@@ -8,8 +11,10 @@
 # Finished files are skipped. The last configuration is the reference.
 
 using UnrelaxedTTG, Printf, LinearAlgebra
+include(joinpath(@__DIR__, "kernel_argument.jl"))         # interlayer_argument!, interlayer_meta
 BLAS.set_num_threads(1)                                   # the momenta are distributed over the Julia threads
 
+interlayer = interlayer_argument!(ARGS)
 set, directory = parse(Int, ARGS[1]), ARGS[2]
 budget = length(ARGS) ≥ 3 ? parse(Float64, ARGS[3]) : Inf
 θ, W₀, L₀ = triple_parameters(set)                       # throws for an unknown set
@@ -23,7 +28,7 @@ if length(ARGS) ≥ 4
 end
 
 stack = Stack(1.42 * √3, θ)
-model = Model(stack; τ = 8.5, δ = 6.5)
+model = Model(stack; τ = 8.5, δ = 6.5, interlayer)
 path = linecut(stack, 2)                                   # vertices and segment midpoints
 points = path.q[1:end-1]                                   # K₁, ·, K₂, ·, Γ₁₂, ·, Γ₂₃, ·, K₂, · (K₃ is the 11th)
 push!(points, path.q[end]); deleteat!(points, 9)           # drop the second K₂
@@ -36,6 +41,7 @@ meta = sprint() do io
     println(io, "theta ", join(θ, " ")); println(io, "P ", P); println(io, "s ", s); println(io, "B_H ", B_H)
     println(io, "configurations ", join(["$(c[1]),$(c[2])" for c in configurations], " "))
     println(io, "points ", join(["$(p[1]),$(p[2])" for p in points], " "))
+    interlayer_meta(io, interlayer)
 end
 claim_directory(directory, meta)                         # throws if the folder holds moments of a run with other parameters
 file(c, i) = joinpath(directory, @sprintf("mu_%d_%02d.bin", c, i))

@@ -95,10 +95,11 @@ candidates), `W_ref`, `momenta`, `difference` (candidates × momenta), `labels` 
 function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int = 60,
                   momenta = 1:30:(5Nq + 1), floor_momenta = (first(momenta), momenta[cld(length(momenta), 2)]),
                   precision::Type = ComplexF32, drop::Real = 1e-5,
-                  E = range(-0.2, 0.2; length = 4001), log::IO = stdout, directory = nothing, kernel = Jackson())
+                  E = range(-0.2, 0.2; length = 4001), log::IO = stdout, directory = nothing, kernel = Jackson(),
+                  interlayer::Symbol = DEFAULT_INTERLAYER)
     θ = triple_parameters(set)[1]
     stack = Stack(1.42 * √3, θ)
-    model = Model(stack; τ = 8.5, δ = 6.5)
+    model = Model(stack; τ = 8.5, δ = 6.5, interlayer)
     path = linecut(stack, Nq)
     B_H, _ = spectral_bound(model, W_ref)
     s = 0.95 / B_H
@@ -106,6 +107,7 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
     all(<(W_ref), Ws) || throw(ArgumentError("every candidate must be smaller than W_ref"))
     @printf(log, "θ = %s, L = %.2f, P = %d, B_H = %.4f eV (from W_ref = %.4f), %s, %s, drop %.0e eV\n",
         string(θ), L, P, B_H, W_ref, kernel_text(kernel, s, P), precision, drop); flush(log)
+    println(log, "interlayer model: ", interlayer)
     difference = zeros(length(Ws), length(momenta))
     labels = zeros(Int, length(Ws) + 1, length(momenta))
     seconds = zeros(length(Ws) + 1, length(momenta))
@@ -153,6 +155,7 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
             println(io, "theta ", join(θ, " ")); println(io, "L ", L); println(io, "P ", P); println(io, "B_H ", B_H)
             println(io, "s ", s); println(io, "W_ref ", W_ref); println(io, "candidates ", join(Ws, " "))
             println(io, "momenta ", join(momenta, " ")); println(io, "precision ", precision); println(io, "drop_eV ", drop)
+            interlayer_meta(io, interlayer)
             println(io, "floor ", floor); println(io, "chosen_W ", choice)
         end
     end
@@ -167,15 +170,16 @@ momenta `momenta` of the line cut, at the common scale s = 0.95/B_H (pass the B_
 """
 function sweep_L(; set::Int, W::Real, Ls, L_ref::Real, P::Int, B_H::Real, Nq::Int = 60, momenta = 1:60:(5Nq + 1),
                  precision::Type = ComplexF32, drop::Real = 1e-5, E = range(-0.2, 0.2; length = 4001), log::IO = stdout,
-                 kernel = Jackson())
+                 kernel = Jackson(), interlayer::Symbol = DEFAULT_INTERLAYER)
     θ = triple_parameters(set)[1]
     stack = Stack(1.42 * √3, θ)
-    model = Model(stack; τ = 8.5, δ = 6.5)
+    model = Model(stack; τ = 8.5, δ = 6.5, interlayer)
     path = linecut(stack, Nq)
     s = 0.95 / B_H
     Ls = sort(collect(Float64, Ls))
     @printf(log, "θ = %s, W = %.4f, L_ref = %.3f, P = %d, B_H = %.4f eV, %s, %s, drop %.0e eV\n",
         string(θ), W, L_ref, P, B_H, kernel_text(kernel, s, P), precision, drop); flush(log)
+    println(log, "interlayer model: ", interlayer)
     difference = zeros(length(Ls), length(momenta))
     labels = zeros(Int, length(Ls) + 1, length(momenta))
     seconds = zeros(length(Ls) + 1, length(momenta))

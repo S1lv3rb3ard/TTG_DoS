@@ -2,7 +2,8 @@
 # and Sections 4.2–4.4).
 
 """
-    Model(stack; τ, δ, table = :I, shift = true, ς = 0, parameters = FANG_KAXIRAS, hankel = (;))
+    Model(stack; τ, δ, table = :I, shift = true, ς = 0, parameters = ANALYTIC_REFIT_6_7, hankel = (;))
+    Model(stack; τ, δ, interlayer = :fang_kaxiras, …)
 
 Everything that does not depend on the starting momentum q:
 
@@ -14,10 +15,15 @@ Everything that does not depend on the starting momentum q:
     τ, δ      momentum cutoff g_τ of the interlayer hopping (eq. (4.4)), 0 < δ < τ (Å⁻¹)
     ς         damping length (Å) of the regularization (2.13): ĥ is multiplied by
               e^{−ς²‖ξ‖²/2}; ς = 0 is the model of Section 5
+    interlayer  the radial model of the interlayer hopping ([`InterlayerModel`](@ref)):
+              `parameters`, or `interlayer_model(interlayer)` if the name `interlayer`
+              is given (`:fang_kaxiras`, `:analytic_refit` or `:analytic_refit_6_7`, see
+              `INTERLAYER_MODELS`). Only one of the two keywords may be given; without
+              either the model is `DEFAULT_INTERLAYER` (`ANALYTIC_REFIT_6_7`).
 
 `hankel` are keyword arguments of [`HankelTable`](@ref).
 """
-struct Model{T<:Real}
+struct Model{T<:Real,I<:InterlayerModel}
     stack::Stack{T}
     shells::Shells{T}
     E_D::T
@@ -25,15 +31,20 @@ struct Model{T<:Real}
     τ::T
     δ::T
     ς::T
+    interlayer::I
 end
 
 function Model(stack::Stack{T}; τ::Real, δ::Real, table::Symbol = :I, shift::Bool = true, ς::Real = 0,
-        parameters::InterlayerParameters = FANG_KAXIRAS, hankel = (;)) where {T}
+        parameters::Union{InterlayerModel,Nothing} = nothing, interlayer::Union{Symbol,Nothing} = nothing,
+        hankel = (;)) where {T}
     0 < δ < τ || throw(ArgumentError("the cutoff needs 0 < δ < τ"))
+    parameters === nothing || interlayer === nothing ||
+        throw(ArgumentError("give the interlayer model either by `parameters` or by name (`interlayer`), not both"))
+    p = interlayer !== nothing ? interlayer_model(interlayer) : something(parameters, interlayer_model(DEFAULT_INTERLAYER))
     ς ≥ 0 || throw(ArgumentError("ς must be nonnegative"))
     shells = Shells(stack.a; table)
     E_D = shift ? dirac_energy(shells) : zero(T)
-    return Model{T}(stack, shells, E_D, HankelTable(parameters, stack.a, T(τ); hankel...), T(τ), T(δ), T(ς))
+    return Model{T,typeof(p)}(stack, shells, E_D, HankelTable(p, stack.a, T(τ); hankel...), T(τ), T(δ), T(ς), p)
 end
 
 """

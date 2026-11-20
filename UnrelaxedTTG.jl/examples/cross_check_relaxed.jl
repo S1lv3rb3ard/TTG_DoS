@@ -18,7 +18,7 @@ basis = R.Basis(relaxed, 0.22, 7.0)
 prepared = R.RelaxedHamiltonian(relaxed, basis, R.Shells(relaxed), R.zero_relaxation(relaxed); q, verbose = false,
     interlayer = (nᵣ = 200, n_φ = 256))
 H_relaxed = Matrix(prepared(q))
-model = U.Model(unrelaxed; τ = 6.25, δ = 0.25, table = :II, shift = false)
+model = U.Model(unrelaxed; τ = 6.25, δ = 0.25, table = :II, shift = false, parameters = U.FANG_KAXIRAS)
 window = U.Window(unrelaxed, q, 0.3, 7.0)
 H = Matrix(U.hamiltonian(model, window))
 pairs = [(s, window.index[U.Label(basis.layer[s], basis.n[s])]) for s in 1:length(basis)

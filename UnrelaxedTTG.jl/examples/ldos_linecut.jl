@@ -1,7 +1,10 @@
 # Momentum LDoS along the path K₁–K₂–Γ₁₂–Γ₂₃–K₂–K₃ (manuscript, Figure 5.2(b)) at the
 # parameters of Section 5: θ = (−1.4°, 0°, 2.8°), τ = 8.5, δ = 6.5, W = 0.4742, L = 19.40.
 #
-#   julia -t auto --project=. examples/ldos_linecut.jl [P] [Nq] [output file] [legacy] [eta=<η>] [m=<order>]
+#   julia -t auto --project=. examples/ldos_linecut.jl [P] [Nq] [output file] [legacy] [eta=<η>] [m=<order>] [interlayer=<name>]
+#
+# The interlayer model is `DEFAULT_INTERLAYER` (the refit of orders (6, 7)); `interlayer=<name>` selects another
+# (`UnrelaxedTTG.INTERLAYER_MODELS`, e.g. `interlayer=fang_kaxiras`).
 #
 # With `eta=<η>` (eV) the moments are evaluated with the delta-Chebyshev kernel of order m
 # (default 6) of arXiv:2512.03149 instead of the Jackson kernel (`kernel_argument.jl`).
@@ -20,6 +23,7 @@ using UnrelaxedTTG, Printf
 include(joinpath(@__DIR__, "kernel_argument.jl"))
 
 kernel = kernel_argument!(ARGS)
+interlayer = interlayer_argument!(ARGS; default = "legacy" in ARGS ? :fang_kaxiras : DEFAULT_INTERLAYER)   # legacy: the MATLAB model
 P = length(ARGS) ≥ 1 ? parse(Int, ARGS[1]) : 8000
 Nq = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 20
 output = length(ARGS) ≥ 3 ? ARGS[3] : "ldos_linecut.txt"
@@ -27,7 +31,7 @@ output = length(ARGS) ≥ 3 ? ARGS[3] : "ldos_linecut.txt"
 legacy = length(ARGS) ≥ 4 && ARGS[4] == "legacy"
 
 stack = Stack(1.42 * √3, (-1.4, 0.0, 2.8))
-model = legacy ? Model(stack; τ = 8.5, δ = 6.5, table = :II, shift = false) : Model(stack; τ = 8.5, δ = 6.5)
+model = legacy ? Model(stack; τ = 8.5, δ = 6.5, table = :II, shift = false, interlayer) : Model(stack; τ = 8.5, δ = 6.5, interlayer)
 W, L = 0.4742, 19.40
 path = linecut(stack, Nq; Γ = legacy ? :legacy : :moire)
 E = range(-0.5, 0.5; length = 501)

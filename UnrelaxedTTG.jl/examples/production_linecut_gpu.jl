@@ -15,6 +15,7 @@
 # `choose_W.jl`. `cpu_workers` further tasks compute whole momenta on the CPU (same precision and matrix).
 
 using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
+include(joinpath(@__DIR__, "kernel_argument.jl"))            # interlayer_meta
 
 """
     linecut_gpu(; set, P, Nq, directory, W, L, B_H, precision, drop, consumers, builders, queue, budget, log, cpu_workers) -> done
@@ -39,6 +40,14 @@ evaluates the same files with the delta-Chebyshev kernel of arXiv:2512.03149.
 Keyword arguments:
 
 - `set`: the angle triple, see [`triple_parameters`](@ref).
+- `interlayer`: the interlayer model by name, `:analytic_refit_6_7` (default, the manuscript,
+  `DEFAULT_INTERLAYER`), `:fang_kaxiras` or `:analytic_refit` (see `INTERLAYER_MODELS`), or a model
+  object (e.g. an `AnalyticRefit` of higher order). A run with a refit gets the line
+  `interlayer <name>` in its meta.txt (a Fang–Kaxiras run none, as before version 0.6.0),
+  a run with a model object the line `interlayer <the object with all its parameters>`, so the
+  moments of different models cannot be mixed.
+- `ς`: length (Å) of the Gaussian regularization (2.13), ĥ → e^{−ς²‖ξ‖²/2} ĥ (default 0, none). A run
+  with ς > 0 gets the line `varsigma <ς>` in its meta.txt.
 - `P`: number of Chebyshev moments; the resolution is ε_P = π/(sP).
 - `Nq`: steps per segment of the path.
 - `directory`: output folder (created if needed).
@@ -78,11 +87,13 @@ The Julia session must have several threads (`julia -t auto`); `using CUDA` must
 """
 function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing, L = nothing, B_H = nothing,
                      consumers::Int = 2, builders::Int = max(1, Threads.nthreads() - consumers - 1),
-                     queue::Int = 6, budget::Real = Inf, log::IO = stdout, precision::Type = ComplexF64, drop::Real = 0.0, cpu_workers::Int = 0)
+                     queue::Int = 6, budget::Real = Inf, log::IO = stdout, precision::Type = ComplexF64, drop::Real = 0.0, cpu_workers::Int = 0,
+                     interlayer::Union{Symbol,InterlayerModel} = DEFAULT_INTERLAYER, ς::Real = 0)
     θ, W₀, L₀ = triple_parameters(set)
     W = something(W, W₀); L = something(L, L₀)
     stack = Stack(1.42 * √3, θ)
-    model = Model(stack; τ = 8.5, δ = 6.5)
+    model = interlayer isa Symbol ? Model(stack; τ = 8.5, δ = 6.5, ς, interlayer) :
+                                    Model(stack; τ = 8.5, δ = 6.5, ς, parameters = interlayer)
     path = linecut(stack, Nq)
     δ_s = 0.05
     B_W, 𝔍 = spectral_bound(model, W)
@@ -92,13 +103,15 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
         println(io, "theta ", join(θ, " ")); println(io, "W ", W); println(io, "L ", L); println(io, "P ", P)
         println(io, "Nq ", Nq); println(io, "B_H ", B_H); println(io, "J ", 𝔍); println(io, "delta_s ", δ_s); println(io, "s ", s)
         println(io, "precision ", precision); println(io, "drop_eV ", drop); println(io, "tau 8.5"); println(io, "delta 6.5"); println(io, "table I, Dirac shift E_D ", model.E_D)
+        interlayer_meta(io, interlayer)
+        ς > 0 && println(io, "varsigma ", ς)
         println(io, "ticks ", join(path.ticks, " ")); println(io, "arclength ", join(path.s, " "))
     end
     claim_directory(directory, meta)                   # throws if the folder holds moments of a run with other parameters
     file(i) = joinpath(directory, @sprintf("mu_%04d.bin", i))
     pending = [i for i in eachindex(path.q) if !isfile(file(i))]
-    @printf(log, "%d of %d momenta to do; B_H = %.4f eV, ε_P = %.3f meV, %d builders, %d GPU tasks\n", length(pending),
-        length(path.q), B_H, 1e3 * kpm_resolution(s, P), builders, consumers); flush(log)
+    @printf(log, "%d of %d momenta to do; B_H = %.4f eV, ε_P = %.3f meV, %d builders, %d GPU tasks, interlayer %s\n", length(pending),
+        length(path.q), B_H, 1e3 * kpm_resolution(s, P), builders, consumers, interlayer_label(interlayer) * (ς > 0 ? ", ς = $ς Å" : "")); flush(log)
     start = time()
     todo = Channel{Int}(length(pending) + 1); foreach(i -> put!(todo, i), pending); close(todo)
     built = Channel{Tuple{Int,SlicedELL{precision,Vector{precision},Vector{Int32}},Vector{Int},Int}}(queue)

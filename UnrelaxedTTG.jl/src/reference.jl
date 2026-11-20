@@ -34,7 +34,7 @@ two-dimensional polar quadrature of the real-space hopping (F.5), without
 Hankel transforms.
 """
 function reference_fourier_hopping(model::Model{T}, j::Integer, k::Integer, ξ; R::Real = 8 * model.stack.a,
-        nᵣ::Integer = 400, n_φ::Integer = 720, parameters::InterlayerParameters = FANG_KAXIRAS) where {T}
+        nᵣ::Integer = 400, n_φ::Integer = 720, parameters::InterlayerModel = model.interlayer) where {T}
     stack = model.stack
     x, w = polar_quadrature(nᵣ, n_φ, R)
     ĥ = zeros(Complex{T}, 2, 2)

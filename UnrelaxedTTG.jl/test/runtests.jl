@@ -11,7 +11,7 @@ HAS_CUDA && @eval using CUDA
 
 Random.seed!(20261111)
 const stack = Stack(1.42 * √3, (-1.4, 0.0, 2.8))
-const model = Model(stack; τ = 8.5, δ = 6.5)
+const model = Model(stack; τ = 8.5, δ = 6.5, parameters = FANG_KAXIRAS)     # the references below are Fang–Kaxiras
 
 """All labels of ℒ*(L) (a finite set), as a `Window` built from an explicit list."""
 function all_labels(stack, q, L)
@@ -138,6 +138,133 @@ end
     @test abs(abs(w_K[1, 2]) - abs(w_K[1, 1])) < 0.01
     @test @inferred(fourier_hopping(model.ĥ, stack.K[1], τ̂[1], τ̂[2])) isa SMatrix{2,2,ComplexF64,4}
     @test (@allocated fourier_hopping(model.ĥ, stack.K[1], τ̂[1], τ̂[2])) == 0
+end
+
+@testset "analytic refit of the interlayer hopping (note of 17 November 2026)" begin
+    p = ANALYTIC_REFIT
+    a = stack.a
+    @test interlayer_model(:fang_kaxiras) === FANG_KAXIRAS
+    @test DEFAULT_INTERLAYER === :analytic_refit_6_7
+    @test Model(stack; τ = 8.5, δ = 6.5).interlayer === ANALYTIC_REFIT_6_7          # the default model
+    @test interlayer_model(:analytic_refit) === ANALYTIC_REFIT
+    @test_throws ArgumentError interlayer_model(:pathak)
+    @test_throws ArgumentError Model(stack; τ = 8.5, δ = 6.5, parameters = FANG_KAXIRAS, interlayer = :analytic_refit)
+    @test model.interlayer === FANG_KAXIRAS                                   # the default is unchanged
+    refit = Model(stack; τ = 8.5, δ = 6.5, interlayer = :analytic_refit)
+    @test refit.interlayer === ANALYTIC_REFIT
+    @test Model(stack; τ = 8.5, δ = 6.5, parameters = ANALYTIC_REFIT).ĥ.c == refit.ĥ.c
+    # Radial functions against the monomial form of the note (Section 2), and V₀ unchanged
+    for r in (0.0, 0.1, 0.225, 0.466, 0.8, 1.3, 2.0)
+        V₀, V₃, V₆ = U.radial(p, r)
+        @test V₀ == U.radial(FANG_KAXIRAS, r)[1]
+        @test V₃ ≈ r^3 * exp(-3.12975r^2) * (-0.2148834 - 0.29767616r^2 - 0.19725258r^4) atol = 1e-9
+        @test V₆ ≈ r^6 * exp(-1.99975r^2) * (-0.027578054 + 0.016869835r^2 - 0.022436102r^4 + 0.0049982958r^6) atol = 1e-9
+    end
+    # Laguerre sums against the explicit sum L_j^{(m)}(x) = Σ_k (−1)^k C(j+m, j−k) x^k/k!
+    for m in (3, 6), x in (0.0, 0.7, 3.1, 11.0)
+        v = (0.3, -1.1, 0.25, 0.7, -0.05)
+        explicit = sum(v[j+1] * sum((-1)^k * binomial(j + m, j - k) * x^k / factorial(k) for k in 0:j) for j in 0:4)
+        @test U.laguerre_sum(v, m, x) ≈ explicit rtol = 1e-13
+    end
+    # Smooth at the origin: Ṽ₃(r)/r³ and Ṽ₆(r)/r⁶ have finite limits (the p₀ of the note)
+    @test U.radial(p, 1e-3)[2] / 1e-9 ≈ -0.2148834 rtol = 1e-5
+    @test U.radial(p, 1e-2)[3] / 1e-12 ≈ -0.027578054 rtol = 1e-3
+    # Largest changes of the radial functions (Table 1 of the note): 0.329 and 0.0613 meV
+    r = range(0, 6; length = 60001)
+    d₃ = maximum(x -> abs(U.radial(p, x)[2] - U.radial(FANG_KAXIRAS, x)[2]), r)
+    d₆ = maximum(x -> abs(U.radial(p, x)[3] - U.radial(FANG_KAXIRAS, x)[3]), r)
+    @test 3.28e-4 < d₃ < 3.30e-4
+    @test 6.10e-5 < d₆ < 6.16e-5
+    # Closed-form Hankel transforms against Gauss–Legendre quadrature of the radial functions
+    s, w = gauss_legendre(800)
+    x = @. 8a * (s + 1) / 2
+    for ρ in (0.0, 0.37, 1.7031, 3.0, 5.2, 8.5)
+        exact = closed_form_hankel(p, a, ρ)
+        for (i, n) in ((2, 3), (3, 6))
+            direct = sum(q -> 4a * w[q] * x[q] * U.radial(p, x[q] / a)[i] * U.besselj(n, ρ * x[q]), eachindex(x))
+            @test exact[i-1] ≈ direct atol = 1e-14
+        end
+        @test collect(hankel(refit.ĥ, ρ)[2:3]) ≈ collect(exact) atol = 1e-13      # Chebyshev table, tolerance 1e-13
+        @test hankel(refit.ĥ, ρ)[1] ≈ hankel(model.ĥ, ρ)[1] atol = 1e-15        # same V₀
+    end
+    @test closed_form_hankel(FANG_KAXIRAS, a, 1.0) === nothing
+    # Gaussian decay: the transforms at aρ ≈ 30 are below 10⁻²⁵ eV Å², those of Fang–Kaxiras ~10⁻⁷
+    @test maximum(abs, closed_form_hankel(p, a, 12.0)) < 1e-25
+    # Symmetries and the transform of the hopping itself (2D quadrature, without Hankel transforms)
+    τ̂ = stack.τ̂
+    for (j, k) in ((1, 2), (2, 3)), α in 1:2, β in 1:2, _ in 1:3
+        y = 3 * randn(SVector{2,Float64})
+        @test interlayer_hopping(y, p, a, τ̂[j], τ̂[k], α, β) ≈ interlayer_hopping(-y, p, a, τ̂[k], τ̂[j], β, α)
+    end
+    @test interlayer_hopping(zero(SVector{2,Float64}), p, a, τ̂[1], τ̂[2], 1, 2) ≈ p.t₀
+    for (j, k) in ((1, 2), (2, 3), (2, 1)), _ in 1:3
+        ξ = 2.5 * randn(SVector{2,Float64})
+        norm(ξ) < refit.τ || continue
+        ĥ = fourier_hopping(refit.ĥ, ξ, τ̂[j], τ̂[k])
+        @test ĥ ≈ reference_fourier_hopping(refit, j, k, ξ) atol = 1e-12
+        @test fourier_hopping(refit.ĥ, ξ, τ̂[k], τ̂[j]) ≈ ĥ' atol = 1e-15
+    end
+    # Coupling at the Dirac point: 104.01 meV (Fang–Kaxiras) against 103.95 meV (refit)
+    w_FK = stack.Γ * fourier_hopping(model.ĥ, stack.K[1], τ̂[1], τ̂[2])
+    w_R = stack.Γ * fourier_hopping(refit.ĥ, stack.K[1], τ̂[1], τ̂[2])
+    @test maximum(abs, w_R - w_FK) < 2e-4
+    @test (@allocated fourier_hopping(refit.ĥ, stack.K[1], τ̂[1], τ̂[2])) == 0
+    # The truncated Hamiltonians differ only in the interlayer blocks, by about a meV
+    q = stack.K[2] + SVector(0.01, 0.02)
+    window = Window(stack, q, 0.2, 3.5)
+    H, H_R = hamiltonian(model, window), hamiltonian(refit, window)
+    @test H_R == H_R'
+    @test norm(Matrix(H_R) - reference_hamiltonian(refit, window; quadrature = (nᵣ = 200, n_φ = 360))) < 1e-11
+    D = Matrix(H_R - H)
+    for (s, x) in enumerate(window.labels)                                    # intralayer blocks equal
+        o = collect(orbitals(s))
+        @test all(iszero, D[o, o])
+    end
+    @test 1e-4 < opnorm(D) < 3e-3
+end
+
+@testset "analytic refit of orders (6, 7) (report of 18 November 2026, Section 3)" begin
+    p = ANALYTIC_REFIT_6_7
+    a = stack.a
+    @test interlayer_model(:analytic_refit_6_7) === p
+    @test length(p.v₃) == 7 && length(p.v₆) == 8
+    refit = Model(stack; τ = 8.5, δ = 6.5, interlayer = :analytic_refit_6_7)
+    # radial functions and transforms against an independent SciPy evaluation (higher_order/round67.py)
+    for (r, v) in ((0.1, -0.0002484642360801281), (0.5, -0.017160951889482474), (1.0, -0.031049200964120695), (2.0, -0.00012982491482208656))
+        @test U.radial(p, r)[2] ≈ v rtol = 1e-12
+    end
+    for (r, v) in ((0.1, -5.0790966774961756e-08), (0.5, -0.0002844709240055337), (1.0, -0.003806476447416805), (2.0, 1.824369876837811e-05))
+        @test U.radial(p, r)[3] ≈ v rtol = 1e-12
+    end
+    for ((ϱ, h₃), (_, h₆)) in zip(((1.0, -0.0005866786118088399), (4.1887902047863905, -0.007330017444538056), (8.0, -1.3963987758233018e-05), (15.0, -7.973723266454001e-06)), ((1.0, 1.2077172579806074e-06), (4.1887902047863905, -0.0013873455375576892), (8.0, 1.7243892718959015e-05), (15.0, -1.6212154326128062e-06)))
+        exact = closed_form_hankel(p, a, ϱ / a) ./ a^2
+        @test exact[1] ≈ h₃ atol = 1e-16
+        @test exact[2] ≈ h₆ atol = 1e-16
+    end
+    # largest changes of the radial functions: 0.158 and 0.0288 meV
+    r = range(0, 6; length = 60001)
+    d₃ = maximum(x -> abs(U.radial(p, x)[2] - U.radial(FANG_KAXIRAS, x)[2]), r)
+    d₆ = maximum(x -> abs(U.radial(p, x)[3] - U.radial(FANG_KAXIRAS, x)[3]), r)
+    @test 1.57e-4 < d₃ < 1.59e-4
+    @test 2.87e-5 < d₆ < 2.90e-5
+    # closed form against quadrature and against the table
+    s, w = gauss_legendre(800)
+    x = @. 8a * (s + 1) / 2
+    for ρ in (0.0, 0.37, 1.7031, 3.0, 5.2, 8.5)
+        exact = closed_form_hankel(p, a, ρ)
+        for (i, n) in ((2, 3), (3, 6))
+            direct = sum(q -> 4a * w[q] * x[q] * U.radial(p, x[q] / a)[i] * U.besselj(n, ρ * x[q]), eachindex(x))
+            @test exact[i-1] ≈ direct atol = 1e-14
+        end
+        @test collect(hankel(refit.ĥ, ρ)[2:3]) ≈ collect(exact) atol = 1e-13
+    end
+    # closer to Fang–Kaxiras than the refit of orders (2, 3): Hamiltonian difference on a small window
+    q = stack.K[2] + SVector(0.01, 0.02)
+    window = Window(stack, q, 0.2, 3.5)
+    H = hamiltonian(model, window)
+    D₆₇ = opnorm(Matrix(hamiltonian(refit, window) - H))
+    D₂₃ = opnorm(Matrix(hamiltonian(Model(stack; τ = 8.5, δ = 6.5, interlayer = :analytic_refit), window) - H))
+    @test D₆₇ < D₂₃ / 5
 end
 
 @testset "windows (eqs. (4.7), (4.8), (4.27); Theorem 4.3)" begin
@@ -273,7 +400,7 @@ end
         @test μ ≈ μ′ atol = 1e-12
     end
     # the regularization (2.13) damps the interlayer entries and leaves the intralayer blocks
-    damped = hamiltonian(Model(stack; τ = 8.5, δ = 6.5, ς = 0.3), window)
+    damped = hamiltonian(Model(stack; τ = 8.5, δ = 6.5, ς = 0.3, parameters = FANG_KAXIRAS), window)
     offdiagonal(A) = A - blockdiag((A[2s-1:2s, 2s-1:2s] for s in 1:length(window))...)
     @test norm(offdiagonal(damped)) < norm(offdiagonal(H))
     @test norm((damped - offdiagonal(damped)) - (H - offdiagonal(H))) == 0

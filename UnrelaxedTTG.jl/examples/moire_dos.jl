@@ -1,6 +1,9 @@
 # Density of states by the moiré-cell rule (4.39) (manuscript, Proposition 4.10).
 #
-#   julia -t auto --project=. examples/moire_dos.jl [N] [P] [output file] [eta=<η>] [m=<order>]
+#   julia -t auto --project=. examples/moire_dos.jl [N] [P] [output file] [eta=<η>] [m=<order>] [interlayer=<name>]
+#
+# The interlayer model is `DEFAULT_INTERLAYER` (the refit of orders (6, 7)); `interlayer=<name>` selects another
+# (`UnrelaxedTTG.INTERLAYER_MODELS`, e.g. `interlayer=fang_kaxiras`).
 #
 # With `eta=<η>` (eV) the moments are evaluated with the delta-Chebyshev kernel of order m
 # (default 6) of arXiv:2512.03149 instead of the Jackson kernel (`kernel_argument.jl`).
@@ -12,12 +15,13 @@ using UnrelaxedTTG, Printf
 include(joinpath(@__DIR__, "kernel_argument.jl"))
 
 kernel = kernel_argument!(ARGS)
+interlayer = interlayer_argument!(ARGS)
 N = length(ARGS) ≥ 1 ? parse(Int, ARGS[1]) : 4
 P = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 1000
 output = length(ARGS) ≥ 3 ? ARGS[3] : "moire_dos.txt"
 
 stack = Stack(1.42 * √3, (-1.4, 0.0, 2.8))
-model = Model(stack; τ = 8.5, δ = 6.5)
+model = Model(stack; τ = 8.5, δ = 6.5, interlayer)
 W = 0.3112                                              # W₁ of Section 5 for these angles
 L = maximum(1.05 * (W + √3 * dirac_separation(stack, j, moire_cell(stack, j)[2])) /
             (dirac_separation(stack, j, moire_cell(stack, j)[2]) / stack.Knorm) for j in 1:3)

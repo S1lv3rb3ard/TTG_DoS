@@ -38,6 +38,10 @@ recurrence of Section 4.5 runs on the device; the windows and the assembly stay 
     μ      = chebyshev_moments(gpu_matrix(S), c, 2000)
     F      = kpm_density(μ, s, range(-0.2, 0.2; length = 401)) ./ 6      # momentum LDoS (4.36)
 
+The interlayer hopping is that of Fang & Kaxiras (the manuscript) unless another model is chosen;
+the analytic refit of its threefold and sixfold terms, whose Fourier transform decays like a
+Gaussian, is `Model(stack; τ = 8.5, δ = 6.5, interlayer = :analytic_refit)`.
+
 The same moments can be evaluated with the high-order delta-Chebyshev kernel of arXiv:2512.03149
 instead of the Jackson kernel (keyword `kernel` of `kpm_density`, `momentum_ldos`, `moire_dos`,
 `brillouin_dos`; the default `Jackson()` is the method of the manuscript):
@@ -66,7 +70,7 @@ const Mat2{T} = SMatrix{2,2,T,4}
 include("geometry.jl")        # Stack: lattices, Dirac points
 include("quadrature.jl")      # Gauss–Legendre, polar rule, momentum cutoff g_τ
 include("intralayer.jl")      # Jung–MacDonald shells, Bloch matrix, Dirac energy
-include("interlayer.jl")      # Fang–Kaxiras hopping and its Fourier transform
+include("interlayer.jl")      # Fang–Kaxiras hopping, its analytic refit, and their Fourier transforms
 include("window.jl")          # labels, W- and L-truncation, connectedness search
 include("hamiltonian.jl")     # Model and the assembly of Ĥ_q^{(τ,W,L)}
 include("reference.jl")       # slow reference implementations for tests
@@ -80,7 +84,8 @@ export Vec2, Mat2
 export Stack, rotation, others, nearest_dirac, dirac_separation, connectedness_range
 export gauss_legendre, polar_quadrature, momentum_cutoff
 export Shells, jung_macdonald, bloch, dirac_energy, intralayer_bound, band_gap
-export InterlayerParameters, FANG_KAXIRAS, interlayer_hopping, HankelTable, hankel, fourier_hopping
+export InterlayerModel, InterlayerParameters, FANG_KAXIRAS, AnalyticRefit, ANALYTIC_REFIT, ANALYTIC_REFIT_6_7, INTERLAYER_MODELS, DEFAULT_INTERLAYER, interlayer_model
+export interlayer_hopping, closed_form_hankel, HankelTable, hankel, fourier_hopping
 export Label, Window, zero_label, shifted_momentum, momentum, dimension, orbitals, search_window
 export Model, hamiltonian, interlayer_entry, neighbours, interlayer_row_sum, spectral_bound
 export ANGLE_SETS, triple_parameters, claim_directory

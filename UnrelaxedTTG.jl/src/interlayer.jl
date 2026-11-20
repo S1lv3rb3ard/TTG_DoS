@@ -1,5 +1,22 @@
 # Interlayer p_z hopping of graphene (manuscript, Appendix F; Fang & Kaxiras,
-# PRB 93, 235153 (2016)) and its Fourier transform (F.8).
+# PRB 93, 235153 (2016)) and its Fourier transform (F.8). Two radial models:
+# the functions of Fang & Kaxiras (`InterlayerParameters`, `FANG_KAXIRAS`) and an
+# analytic refit of their threefold and sixfold terms whose Fourier transform
+# decays like a Gaussian (`AnalyticRefit`, `ANALYTIC_REFIT`).
+
+"""
+    InterlayerModel
+
+Supertype of the radial models of the interlayer hopping (F.5),
+
+    h(x) = V₀(r) + V₃(r) Θ₃(x̂) + V₆(r) Θ₆(x̂),      r = ‖x‖₂/a.
+
+A model `p` defines `radial(p, r) -> (V₀, V₃, V₆)`; the angular factors Θ₃, Θ₆ are
+those of [`angular`](@ref) for every model. Available: [`InterlayerParameters`](@ref)
+(the form of Fang & Kaxiras) and [`AnalyticRefit`](@ref); by name, see
+[`INTERLAYER_MODELS`](@ref).
+"""
+abstract type InterlayerModel end
 
 """
     InterlayerParameters
@@ -13,7 +30,7 @@ The ten parameters of the interlayer function (Table F.2), with r = ‖x‖₂/a
 The amplitudes t₀, t₃, t₆ (eV) are called λ₀, λ₃, λ₆ in the manuscript; the
 symbol λ is reserved for eigenvalues in this code.
 """
-struct InterlayerParameters{T<:Real}
+struct InterlayerParameters{T<:Real} <: InterlayerModel
     t₀::T
     ξ₀::T
     κ₀::T
@@ -36,6 +53,130 @@ const FANG_KAXIRAS = InterlayerParameters(0.3155, 1.7543, 2.0010, -0.0688, 3.469
     V₃ = p.t₃ * r^2 * exp(-p.ξ₃ * (r - p.x₃)^2)
     V₆ = p.t₆ * exp(-p.ξ₆ * (r - p.x₆)^2) * sin(p.κ₆ * r)
     return V₀, V₃, V₆
+end
+
+"""
+    AnalyticRefit(t₀, ξ₀, κ₀, β₃, v₃, β₆, v₆)
+
+Interlayer hopping with the isotropic function V₀ of Fang & Kaxiras and analytic
+threefold and sixfold functions (note "A refit of the Fang–Kaxiras interlayer
+hopping with a Gaussian-decaying Fourier transform", 17 November 2026):
+
+    V₀(r) = t₀ exp(−ξ₀ r²) cos(κ₀ r)
+    Ṽ_m(r) = r^m exp(−β_m r²/2) Σ_j v_{m,j} L_j^{(m)}(β_m r²),      m ∈ {3, 6},
+
+with the generalised Laguerre polynomials L_j^{(m)} and `v₃`, `v₆` the tuples of
+coefficients (eV). Ṽ_m(r) cos(m(φ − φ₀)) is real-analytic on ℝ², so the hopping is
+real-analytic and its Fourier transform decays like a Gaussian. The Hankel
+transforms of Ṽ₃, Ṽ₆ are known in closed form ([`closed_form_hankel`](@ref)).
+"""
+struct AnalyticRefit{T<:Real,N₃,N₆} <: InterlayerModel
+    t₀::T
+    ξ₀::T
+    κ₀::T
+    β₃::T
+    v₃::NTuple{N₃,T}
+    β₆::T
+    v₆::NTuple{N₆,T}
+end
+
+"""
+The analytic refit of the note of 17 November 2026: V₀ of Fang & Kaxiras, and the
+L²(r dr)-best approximations of their V₃ (three terms) and V₆ (four terms) in the
+form of [`AnalyticRefit`](@ref). It differs from `FANG_KAXIRAS` by at most
+0.33 meV in V₃ and 0.061 meV in V₆; it is a fit to the published Fang–Kaxiras
+functions, not to DFT data.
+"""
+const ANALYTIC_REFIT = AnalyticRefit(0.3155, 1.7543, 2.0010,
+    6.2595, (-0.505794, 0.0978994, -0.0100687),
+    3.9995, (-0.0372218, 0.00134815, 0.00141368, -0.000468766))
+
+"""
+The analytic refit of orders (J₃, J₆) = (6, 7): seven Laguerre terms for V₃ and eight for V₆,
+L²(r dr)-optimal widths rounded to four decimals, coefficients (the projection at the rounded
+width) to six significant digits. It differs from `FANG_KAXIRAS` by at most 0.158 meV in V₃ and
+0.0288 meV in V₆; the Hankel transforms decay like exp(−ρ²a²/(2β₃)), β₃ = 8.6136. On the line cut of
+θ₄ the momentum LDoS differs from Fang–Kaxiras by at most 0.24 % (report of 18 November 2026,
+Section 3). A fit to the published Fang–Kaxiras functions, not to DFT data.
+"""
+const ANALYTIC_REFIT_6_7 = AnalyticRefit(0.3155, 1.7543, 2.0010,
+    8.6136, (-0.803373, 0.284918, -0.0875052, 0.0228126, -0.00598521, 0.00118628, -0.000385441),
+    5.3768, (-0.0916305, 0.0202163, -0.00197556, -0.00129062, 0.000795897, -0.000305824, 7.05733e-05, -1.78057e-05))
+
+"""
+The interlayer models by name, as the drivers in `examples/` accept them:
+`:fang_kaxiras` (`FANG_KAXIRAS`, the published functions of Fang & Kaxiras),
+`:analytic_refit` (`ANALYTIC_REFIT`, orders (2, 3)) and `:analytic_refit_6_7`
+(`ANALYTIC_REFIT_6_7`, orders (6, 7), the model of the manuscript and the default, see
+`DEFAULT_INTERLAYER`).
+"""
+const INTERLAYER_MODELS = (fang_kaxiras = FANG_KAXIRAS, analytic_refit = ANALYTIC_REFIT,
+                           analytic_refit_6_7 = ANALYTIC_REFIT_6_7)
+
+"""
+Name of the default interlayer model, `:analytic_refit_6_7` (`ANALYTIC_REFIT_6_7`), the model
+adopted for the manuscript (20 November 2026). Until version 0.5 the default was
+`:fang_kaxiras`; pass `interlayer = :fang_kaxiras` (or `parameters = FANG_KAXIRAS`) for it.
+"""
+const DEFAULT_INTERLAYER = :analytic_refit_6_7
+
+"""
+    interlayer_model(name::Symbol) -> InterlayerModel
+
+The model `INTERLAYER_MODELS[name]`; an `ArgumentError` for an unknown name.
+"""
+function interlayer_model(name::Symbol)
+    haskey(INTERLAYER_MODELS, name) ||
+        throw(ArgumentError("unknown interlayer model :$name; use one of $(join(":" .* string.(keys(INTERLAYER_MODELS)), ", "))"))
+    return INTERLAYER_MODELS[name]
+end
+
+"""
+    laguerre_sum(v, m, x)
+
+Σ_j v[j+1] L_j^{(m)}(x) for the coefficients `v` (a tuple), by the three-term recurrence
+j L_j = (2j − 1 + m − x) L_{j−1} − (j − 1 + m) L_{j−2}, L₀ = 1, L₁ = 1 + m − x.
+"""
+@inline function laguerre_sum(v::NTuple{N,T}, m::Integer, x::Real) where {N,T}
+    L₀ = one(x)
+    s = v[1] * L₀
+    N == 1 && return s
+    L₁ = 1 + m - x
+    s += v[2] * L₁
+    for j in 2:N-1
+        L₀, L₁ = L₁, ((2j - 1 + m - x) * L₁ - (j - 1 + m) * L₀) / j
+        s += v[j+1] * L₁
+    end
+    return s
+end
+
+"""Radial functions (V₀, Ṽ₃, Ṽ₆)(r) of the analytic refit, r = ‖x‖₂/a."""
+@inline function radial(p::AnalyticRefit, r::Real)
+    V₀ = p.t₀ * exp(-p.ξ₀ * r^2) * cos(p.κ₀ * r)
+    r² = r^2
+    V₃ = r * r² * exp(-p.β₃ * r² / 2) * laguerre_sum(p.v₃, 3, p.β₃ * r²)
+    V₆ = r² * r² * r² * exp(-p.β₆ * r² / 2) * laguerre_sum(p.v₆, 6, p.β₆ * r²)
+    return V₀, V₃, V₆
+end
+
+"""
+    closed_form_hankel(p, a, ρ) -> (ℋ₃, ℋ₆) or nothing
+
+The Hankel transforms ℋ_n(ρ) = ∫₀^∞ V_n(s/a) J_n(ρs) s ds of the threefold and sixfold
+functions in closed form, where one is known: for [`AnalyticRefit`](@ref),
+
+    ℋ_m(ρ) = a² β_m^{−m−1} (aρ)^m exp(−(aρ)²/(2β_m)) Σ_j (−1)^j v_{m,j} L_j^{(m)}((aρ)²/β_m)
+
+(Lemma 1 of the note of 17 November 2026). `nothing` for the Fang–Kaxiras form, whose
+transforms are computed by quadrature.
+"""
+closed_form_hankel(::InterlayerParameters, a::Real, ρ::Real) = nothing
+
+function closed_form_hankel(p::AnalyticRefit, a::Real, ρ::Real)
+    ϱ² = (a * ρ)^2
+    transform(β, v, m) = a^2 * β^(-m - 1) * sqrt(ϱ²)^m * exp(-ϱ² / (2β)) *
+                         laguerre_sum(ntuple(j -> (-1)^(j - 1) * v[j], length(v)), m, ϱ² / β)
+    return transform(p.β₃, p.v₃, 3), transform(p.β₆, p.v₆, 6)
 end
 
 @inline chebyshev₃(z) = 4z^3 - 3z
@@ -84,7 +225,7 @@ Interlayer hopping h_{kβ}^{jα}(x) (eV) at the in-plane separation
 
 It is real and satisfies h_{kβ}^{jα}(x) = h_{jα}^{kβ}(−x) (Assumption 2.6).
 """
-@inline function interlayer_hopping(x::Vec2, p::InterlayerParameters, a::Real, τ̂ⱼ::Vec2, τ̂ₖ::Vec2,
+@inline function interlayer_hopping(x::Vec2, p::InterlayerModel, a::Real, τ̂ⱼ::Vec2, τ̂ₖ::Vec2,
         α::Integer, β::Integer)
     ρ = norm(x)
     V₀, V₃, V₆ = radial(p, ρ / a)
@@ -100,7 +241,8 @@ Chebyshev interpolants on [0, ρmax] of the three Hankel transforms of (F.8),
 
     ℋ_n(ρ) = ∫₀^R V_n(s/a) J_n(ρ s) s ds,      n ∈ {0, 3, 6},
 
-computed with an `nᵣ`-point Gauss–Legendre rule in s and interpolated at `M`
+computed with an `nᵣ`-point Gauss–Legendre rule in s (ℋ₃ and ℋ₆ in closed form
+where [`closed_form_hankel`](@ref) gives them) and interpolated at `M`
 Chebyshev nodes in ρ. `R` is the real-space cutoff of the integral (the radial
 functions decay like Gaussians in s/a; at s = 8a they are below 10⁻⁴⁰ eV).
 `c[m, i]` is the coefficient of T_{m−1} for the order n = (0, 3, 6)[i]. Trailing
@@ -113,7 +255,7 @@ struct HankelTable{T<:Real}
     c::Matrix{T}
 end
 
-function HankelTable(p::InterlayerParameters, a::Real, ρmax::Real; R::Real = 8a, nᵣ::Integer = 600,
+function HankelTable(p::InterlayerModel, a::Real, ρmax::Real; R::Real = 8a, nᵣ::Integer = 600,
         M::Integer = 384, tolerance::Real = 1e-13)
     ρmax > 0 || throw(ArgumentError("ρmax must be positive"))
     T = float(promote_type(typeof(a), typeof(ρmax)))
@@ -128,6 +270,8 @@ function HankelTable(p::InterlayerParameters, a::Real, ρmax::Real; R::Real = 8a
         for (col, order) in enumerate((0, 3, 6))
             values[i, col] = sum(q -> ws[q] * V[q][col] * besselj(order, ρ * s[q]), eachindex(s))
         end
+        exact = closed_form_hankel(p, a, ρ)
+        exact === nothing || (values[i, 2:3] .= exact)
     end
     c = zeros(T, M, 3)
     for m in 1:M, col in 1:3                                 # discrete Chebyshev transform
