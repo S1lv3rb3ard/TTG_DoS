@@ -1,10 +1,13 @@
 # Production line cut with checkpoints (manuscript, Figures 5.1(b) and 5.2(b)).
 #
-#   julia -t auto --project=. examples/production_linecut.jl <set> <P> <Nq> <directory> [budget in seconds] [W] [L] [interlayer=<name>]
+#   julia -t auto --project=. examples/production_linecut.jl <set> <P> <Nq> <directory> [budget in seconds] [W] [L] [interlayer=<name>] [B_H=<eV>]
 #
 # The interlayer model is `DEFAULT_INTERLAYER` (the refit of orders (6, 7)); `interlayer=<name>` selects another
 # (`UnrelaxedTTG.INTERLAYER_MODELS`). A refit run has the line `interlayer <name>` in its meta.txt, a
-# Fang–Kaxiras run (`interlayer=fang_kaxiras`) none.
+# Fang–Kaxiras run (`interlayer=fang_kaxiras`) none. `B_H=<eV>` overrides the bound spectral_bound(model, W)
+# (a smaller value gives a warning, and `scaled` throws at a momentum with ‖Ĥ_q‖_∞ > B_H), e.g. to run a
+# second model at the scale s of a first run for compare_interlayer.jl (copy B_H with all its digits from
+# the first run's meta.txt).
 #
 # <set> = 1, …, 4 is the angle triple of `UnrelaxedTTG.ANGLE_SETS` with its default W = (W₁ + W*)/2 and L by (5.5):
 # 1: θ = (−1.4°, 0°, 2.8°), W = 0.4742, L = 19.40;   2: θ = (−√3/2°, 0°, √2/2°), W = 0.3771, L = 30.56;
@@ -13,7 +16,8 @@
 # For every momentum of the path the P Chebyshev moments of the zero-label orbitals are written to
 # <directory>/mu_<index>.bin (P Float64 numbers). Momenta whose file exists are skipped, so the run
 # can be stopped and started again; it stops by itself when the time budget is used up, and at the first
-# momentum that fails (the momenta already running finish, then the error is thrown).
+# momentum that fails (the momenta already running finish, then the error is thrown). While it runs the
+# folder is locked (<directory>/.lock), so a second run in the same folder is refused.
 # `ldos_from_moments.jl` turns the moments into the LDoS on an energy grid, for any P′ ≤ P.
 
 using UnrelaxedTTG, Printf, LinearAlgebra
@@ -21,6 +25,8 @@ include(joinpath(@__DIR__, "kernel_argument.jl"))         # interlayer_argument!
 BLAS.set_num_threads(1)                                   # the momenta are distributed over the Julia threads
 
 interlayer = interlayer_argument!(ARGS)
+i_B = findfirst(startswith("B_H="), ARGS)
+B_H_given = i_B === nothing ? nothing : parse(Float64, split(popat!(ARGS, i_B), '='; limit = 2)[2])
 set, P, Nq, directory = parse(Int, ARGS[1]), parse(Int, ARGS[2]), parse(Int, ARGS[3]), ARGS[4]
 budget = length(ARGS) ≥ 5 ? parse(Float64, ARGS[5]) : Inf
 θ, W, L = triple_parameters(set)                         # throws for an unknown set
@@ -32,7 +38,9 @@ stack = Stack(1.42 * √3, θ)
 model = Model(stack; τ = 8.5, δ = 6.5, interlayer)
 path = linecut(stack, Nq)
 δ_s = 0.05
-B_H, 𝔍 = spectral_bound(model, W)
+B_W, 𝔍 = spectral_bound(model, W)
+B_H = something(B_H_given, B_W)
+B_H ≥ B_W || @warn "B_H = $B_H is below spectral_bound(model, W) = $B_W; scaled() checks every matrix and throws if ‖Ĥ_q‖_∞ > B_H"
 s = (1 - δ_s) / B_H
 meta = sprint() do io
     println(io, "theta ", join(θ, " ")); println(io, "W ", W); println(io, "L ", L); println(io, "P ", P)
@@ -41,7 +49,7 @@ meta = sprint() do io
     interlayer_meta(io, interlayer)
     println(io, "ticks ", join(path.ticks, " ")); println(io, "arclength ", join(path.s, " "))
 end
-claim_directory(directory, meta)                         # throws if the folder holds moments of a run with other parameters
+claim_directory(directory, meta)                         # locks the folder until Julia exits; throws if it holds moments of other parameters
 file(i) = joinpath(directory, @sprintf("mu_%04d.bin", i))
 pending = [i for i in eachindex(path.q) if !moments_complete(file(i), P)]   # a cut-off file is recomputed
 @printf("%d of %d momenta to do; B_H = %.4f eV, ε_P = %.3f meV, %d threads\n", length(pending), length(path.q), B_H,

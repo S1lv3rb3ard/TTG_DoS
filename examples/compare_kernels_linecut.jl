@@ -23,13 +23,16 @@ using UnrelaxedTTG, Printf, Statistics
 
 const E = range(-0.2, 0.2; length = 801)
 
-"""s, the moments (P_run × momenta) and the arc lengths of a line-cut folder."""
+"""s, the moments (P_run × momenta) and the arc lengths of a finished line-cut folder (throws if a momentum is not finished)."""
 function read_linecut(directory)
     meta = Dict(split(line, ' '; limit = 2)[1] => split(line, ' '; limit = 2)[2] for line in eachline(joinpath(directory, "meta.txt")))
     P, s = parse(Int, meta["P"]), parse(Float64, meta["s"])
     arclength = parse.(Float64, split(meta["arclength"]))
     μ = zeros(P, length(arclength))
     buffer = Vector{Float64}(undef, P)
+    unfinished = [i for i in eachindex(arclength) if !moments_complete(joinpath(directory, @sprintf("mu_%04d.bin", i)), P)]
+    isempty(unfinished) || throw(ArgumentError("$directory: $(length(unfinished)) of $(length(arclength)) momenta are not " *
+        "finished (the first is $(first(unfinished))); finish the run first"))
     for i in eachindex(arclength)
         read!(joinpath(directory, @sprintf("mu_%04d.bin", i)), buffer)
         μ[:, i] = buffer
@@ -57,6 +60,7 @@ directory = ARGS[1]
 s, μ, arclength = read_linecut(directory)
 P_run = size(μ, 1)
 P = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : P_run
+1 ≤ P ≤ P_run || throw(ArgumentError("P = $P must lie in 1, …, $P_run (the number of stored moments)"))
 output = length(ARGS) ≥ 3 ? ARGS[3] : "compare_kernels.txt"
 ε₁, ε₂ = π / (s * P), 4 / (s * P)
 P₂ = round(Int, π / (s * ε₂))

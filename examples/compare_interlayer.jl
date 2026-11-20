@@ -8,7 +8,9 @@
 # first with `interlayer = :fang_kaxiras` (the default is the refit of orders (6, 7) since version
 # 0.6.0), then with the refit (the default, or `interlayer = :analytic_refit` for orders (2, 3)) and
 # `B_H` set to the B_H of the first run (from its meta.txt, all digits), so that both runs have the
-# same scale s and resolution ε_P. Folders of `production_linecut.jl` (CPU) work too.
+# same scale s and resolution ε_P. Two folders of `production_linecut.jl` (CPU) work the same way, with the
+# argument `B_H=<eV>` for the second run; a CPU folder and a GPU folder are not compared (their meta.txt
+# differ in precision and drop_eV).
 
 using UnrelaxedTTG, LinearAlgebra, Printf, SparseArrays
 
@@ -16,7 +18,8 @@ using UnrelaxedTTG, LinearAlgebra, Printf, SparseArrays
     operator_norm(D; iterations = 300) -> Float64
 
 Largest singular value of the sparse matrix `D` by the power method on D'D (a lower bound that
-converges from below; the relative change of the last step is printed if it exceeds 10⁻⁶).
+converges from below). If the relative change of the last step still exceeds 10⁻⁹ after
+`iterations` steps, a warning gives it.
 """
 function operator_norm(D; iterations::Int = 300)
     x = normalize(randn(ComplexF64, size(D, 2)))
@@ -25,9 +28,11 @@ function operator_norm(D; iterations::Int = 300)
         y = D' * (D * x)
         σ_new = sqrt(norm(y))
         x = y / norm(y)
-        abs(σ_new - σ) ≤ 1e-9 * σ_new && return σ_new
+        change = abs(σ_new - σ) / σ_new
         σ = σ_new
+        change ≤ 1e-9 && return σ
     end
+    @warn "operator_norm: no convergence after $iterations steps" σ
     return σ
 end
 
@@ -104,6 +109,8 @@ function compare_linecuts(dir_FK::AbstractString, dir_R::AbstractString; E = ran
             throw(ArgumentError("the runs differ in $key: $(get(m_FK, key, "(none)")) and $(get(m_R, key, "(none)"))"))
     end
     P = parse(Int, m_FK["P"]); s = parse(Float64, m_FK["s"])
+    ς_FK, ς_R = get(m_FK, "varsigma", "0"), get(m_R, "varsigma", "0")      # the regularization (2.13), Å
+    @printf(log, "regularization length ς: %s Å (%s), %s Å (%s)\n", ς_FK, dir_FK, ς_R, dir_R)
     arclength = parse.(Float64, split(m_FK["arclength"]))
     n = length(arclength)
     F_FK = fill(NaN, n, length(E)); F_R = fill(NaN, n, length(E))
@@ -123,7 +130,7 @@ function compare_linecuts(dir_FK::AbstractString, dir_R::AbstractString; E = ran
         findmax(x -> isnan(x) ? -Inf : x, relative)[2], maximum(absolute[done]))
     if output !== nothing
         open(output, "w") do io
-            println(io, "# Fang–Kaxiras: ", dir_FK); println(io, "# refit: ", dir_R)
+            println(io, "# Fang–Kaxiras: ", dir_FK, ", ς = ", ς_FK, " Å"); println(io, "# refit: ", dir_R, ", ς = ", ς_R, " Å")
             println(io, "# index, arc length (1/Å), relative difference (5.2), max |F_R − F_FK| (1/eV)")
             for i in findall(done)
                 @printf(io, "%d %.6f %.6e %.6e\n", i, arclength[i], relative[i], absolute[i])

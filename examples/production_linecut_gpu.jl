@@ -13,7 +13,9 @@
 # `precision = ComplexF32` runs the recurrence in single precision; `drop` (eV) removes the
 # matrix entries with |h| ≤ drop before the recurrence (0 keeps the full matrix).
 # `B_H` (eV) overrides the bound spectral_bound(model, W), e.g. to keep the KPM scale of the W-sweep of
-# `choose_W.jl`. `cpu_workers` further tasks compute whole momenta on the CPU (same precision and matrix).
+# `choose_W.jl`. `cpu_workers` further tasks compute whole momenta on the CPU (same element type and matrix;
+# with ComplexF32 the CPU sums its inner products in single precision, the GPU in Float64, so the two
+# differ at about 10⁻⁶).
 
 using UnrelaxedTTG, CUDA, Printf, LinearAlgebra, SparseArrays
 include(joinpath(@__DIR__, "kernel_argument.jl"))            # interlayer_meta
@@ -63,7 +65,8 @@ Keyword arguments:
   (default: the number of Julia threads − `consumers` − 1, at least 1); `queue`: assembled matrices held between them.
 - `cpu_workers`: further tasks that compute whole momenta on the CPU (default 0; measured on
   15 November 2026 to slow the run down, keep 0).
-- `budget` (s): no new momentum is started after this time (default: no limit).
+- `budget` (s): no new momentum is started after this time, neither assembled nor sent to the GPU
+  (default: no limit).
 - `log`: stream for the progress lines (one per momentum).
 
 Files in `directory`:
@@ -77,7 +80,10 @@ Files in `directory`:
 Momenta whose file exists are skipped, so an interrupted run continues where it stopped. A folder
 that holds moments is accepted only if its `meta.txt` equals that of the present call
 ([`claim_directory`](@ref)); otherwise an `ArgumentError` names the parameters that differ. Note
-that `B_H` must then be passed with all its digits. Returns the number of momenta computed in
+that `B_H` must then be passed with all its digits. The numbers W, L, B_H, drop and ς are written
+as `Float64`, so `drop = 0` and `drop = 0.0` give the same meta.txt. During the call the folder
+is locked (`directory/.lock`, see [`lock_directory`](@ref)): a second run in the same folder at
+the same time is refused. Returns the number of momenta computed in
 this call.
 
 Errors. If a task fails (for example, the GPU runs out of memory, or ‖Ĥ_q‖_∞ > B_H), the error is
@@ -85,7 +91,8 @@ written to `log`, the other tasks stop after the momentum they are working on, a
 throws the error. The moments written until then are kept, so the same call resumes the run.
 If the call itself is interrupted (Ctrl-C), it first stops all its tasks and waits until they have
 finished their current momentum, so that no task writes into the folder after the call has
-returned. A file that is missing, empty or cut short is computed again (`moments_complete`).
+returned. A second Ctrl-C does not shorten this wait. A file that is missing, cut short or all
+zeros is computed again (`moments_complete`).
 
 The Julia session must have several threads (`julia -t auto`); `using CUDA` must come before
 `include` of this file.
@@ -96,14 +103,15 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
                      interlayer::Union{Symbol,InterlayerModel} = DEFAULT_INTERLAYER, ς::Real = 0)
     consumers ≥ 1 || throw(ArgumentError("consumers must be at least 1 (the GPU tasks); for a run on the CPU only use production_linecut.jl"))
     θ, W₀, L₀ = triple_parameters(set)
-    W = something(W, W₀); L = something(L, L₀)
+    W = Float64(something(W, W₀)); L = Float64(something(L, L₀))   # Float64, so that meta.txt does not depend on the spelling
+    drop = Float64(drop); ς = Float64(ς)
     stack = Stack(1.42 * √3, θ)
     model = interlayer isa Symbol ? Model(stack; τ = 8.5, δ = 6.5, ς, interlayer) :
                                     Model(stack; τ = 8.5, δ = 6.5, ς, parameters = interlayer)
     path = linecut(stack, Nq)
     δ_s = 0.05
     B_W, 𝔍 = spectral_bound(model, W)
-    B_H = something(B_H, B_W)                          # a larger B_H (e.g. that of the reference W of choose_W) is allowed
+    B_H = Float64(something(B_H, B_W))                 # a larger B_H (e.g. that of the reference W of choose_W) is allowed
     s = (1 - δ_s) / B_H
     meta = sprint() do io
         println(io, "theta ", join(θ, " ")); println(io, "W ", W); println(io, "L ", L); println(io, "P ", P)
@@ -113,7 +121,17 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
         ς > 0 && println(io, "varsigma ", ς)
         println(io, "ticks ", join(path.ticks, " ")); println(io, "arclength ", join(path.s, " "))
     end
-    claim_directory(directory, meta)                   # throws if the folder holds moments of a run with other parameters
+    claim_directory(directory, meta)                   # locks the folder; throws if it holds moments of a run with other parameters
+    try
+        run_linecut(stack, model, path, W, L, s, B_H, P, directory, consumers, builders, queue, budget, log, precision, drop,
+                    cpu_workers, interlayer, ς)
+    finally
+        unlock_directory(directory)
+    end
+end
+
+function run_linecut(stack, model, path, W, L, s, B_H, P, directory, consumers, builders, queue, budget, log, precision, drop,
+                     cpu_workers, interlayer, ς)
     file(i) = joinpath(directory, @sprintf("mu_%04d.bin", i))
     pending = [i for i in eachindex(path.q) if !moments_complete(file(i), P)]
     @printf(log, "%d of %d momenta to do; B_H = %.4f eV, ε_P = %.3f meV, %d builders, %d GPU tasks, interlayer %s\n", length(pending),
@@ -158,6 +176,7 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
         Threads.@spawn guarded("a GPU") do
             for (i, H̃, present, labels) in built
                 stop[] && break
+                time() - start < budget || continue            # queued momenta are not started after the budget
                 t = time()
                 H̃_gpu = gpu_matrix(H̃)
                 μ = chebyshev_moments(H̃_gpu, present, P)
@@ -199,7 +218,9 @@ function linecut_gpu(; set::Int, P::Int, Nq::Int, directory::String, W = nothing
         close(built)                                       # they have finished their momentum, so that no task
         @printf(log, "interrupted (%s); waiting for the tasks to finish their momentum\n", typeof(err)); flush(log)
         for task in [build; consume; cpu]                  # still writes into the folder after this call returns
-            try wait(task) catch end
+            while !istaskdone(task)                        # a further Ctrl-C does not end the wait
+                try wait(task) catch end
+            end
         end
         rethrow()
     end

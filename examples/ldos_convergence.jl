@@ -43,7 +43,7 @@ meta = sprint() do io
     println(io, "points ", join(["$(p[1]),$(p[2])" for p in points], " "))
     interlayer_meta(io, interlayer)
 end
-claim_directory(directory, meta)                         # throws if the folder holds moments of a run with other parameters
+claim_directory(directory, meta)                         # locks the folder until Julia exits; throws if it holds moments of other parameters
 file(c, i) = joinpath(directory, @sprintf("mu_%d_%02d.bin", c, i))
 # the reference (last) configuration is computed at the five vertices of the path only
 vertices = (1, 3, 5, 7, 10)

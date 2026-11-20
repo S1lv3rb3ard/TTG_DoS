@@ -746,6 +746,12 @@ end
     gauss = moire_dos(model, E; W, L, N = 2, P = 64, kernel = G)
     @test gauss.μ == coarse.μ && gauss.kernel === G && gauss.resolution == 0.05
     @test gauss.ρ == kpm_density(coarse.μ, coarse.s, E; kernel = G)
+    # argument checks: an empty grid, an empty line cut, a scale s ≤ 0
+    @test_throws ArgumentError brillouin_dos(model, E; W, L, N = 0, P = 8)
+    @test_throws ArgumentError linecut(stack, 0)
+    for K in (Jackson(), DeltaChebyshev(0.3, 3), Gaussian(0.05)), s in (0.0, -0.5)
+        @test_throws ArgumentError kpm_density([1.0, 0.0], s, [0.0]; kernel = K)
+    end
 end
 
 @testset "a posteriori bounds (Lemma 4.4, Remark 4.5, Lemma C.4)" begin
@@ -812,22 +818,67 @@ end
     mktempdir() do directory
         folder = joinpath(directory, "run")
         meta = "theta -1.4 0.0 2.8\nW 0.4742\nP 100\n"
-        @test read(claim_directory(folder, meta), String) == meta
+        @test read(claim_directory(folder, meta; lock = false), String) == meta
         # no moments yet: another description takes the folder over
         other = "theta -1.4 0.0 2.8\nW 0.4\nP 200\n"
-        claim_directory(folder, other)
+        claim_directory(folder, other; lock = false)
         @test read(joinpath(folder, "meta.txt"), String) == other
         # with moments: the same description is accepted (line endings are not compared), another is refused
         write(joinpath(folder, "mu_0001.bin"), zeros(200))
-        claim_directory(folder, other)
-        claim_directory(folder, replace(other, "\n" => "\r\n"))
-        claim_directory(folder, other)
-        refusal = try claim_directory(folder, meta); nothing catch e; e end
+        claim_directory(folder, other; lock = false)
+        claim_directory(folder, replace(other, "\n" => "\r\n"); lock = false)
+        claim_directory(folder, other; lock = false)
+        refusal = try claim_directory(folder, meta; lock = false); nothing catch e; e end
         @test refusal isa ArgumentError && occursin("P, W", refusal.msg)
         @test read(joinpath(folder, "meta.txt"), String) == other          # nothing was written
         # moments without meta.txt cannot be attributed
         rm(joinpath(folder, "meta.txt"))
-        @test_throws ArgumentError claim_directory(folder, other)
+        @test_throws ArgumentError claim_directory(folder, other; lock = false)
+        # meta.txt is not written again when it is unchanged, and never through a left-over temporary file
+        fresh = joinpath(directory, "fresh")
+        claim_directory(fresh, meta; lock = false)
+        written = mtime(joinpath(fresh, "meta.txt"))
+        sleep(0.05)
+        claim_directory(fresh, meta; lock = false)
+        @test mtime(joinpath(fresh, "meta.txt")) == written
+        @test readdir(fresh) == ["meta.txt"]
+    end
+    # the lock of an output folder
+    mktempdir() do directory
+        folder = joinpath(directory, "run")
+        lock = joinpath(folder, ".lock")
+        @test lock_directory(folder) == abspath(lock) && isdir(lock)
+        @test occursin("pid $(getpid())", read(joinpath(lock, "owner"), String))
+        refusal = try lock_directory(folder); nothing catch e; e end          # a second run is refused
+        @test refusal isa ArgumentError && occursin("this Julia session", refusal.msg)
+        @test_throws ArgumentError claim_directory(folder, "a 1\n")
+        unlock_directory(folder)
+        @test !isdir(lock)
+        unlock_directory(folder)                                              # not held: nothing happens
+        # claim_directory takes the lock, and releases it when it refuses the folder
+        claim_directory(folder, "a 1\n")
+        @test isdir(lock)
+        unlock_directory(folder)
+        write(joinpath(folder, "mu_0001.bin"), ones(2))
+        @test_throws ArgumentError claim_directory(folder, "a 2\n")
+        @test !isdir(lock)
+        # a lock left by a process of this computer that has ended is taken over
+        process = run(`$(Base.julia_cmd()) --startup-file=no -e "sleep(0.5)"`; wait = false)
+        pid = getpid(process)
+        wait(process)
+        @test !UnrelaxedTTG.process_running(pid) && UnrelaxedTTG.process_running(getpid())
+        mkdir(lock); write(joinpath(lock, "owner"), "pid $pid host $(gethostname()) time 0\n")
+        @test lock_directory(folder) == abspath(lock)
+        @test occursin("pid $(getpid())", read(joinpath(lock, "owner"), String))
+        unlock_directory(folder)
+        # a lock of another computer, or without an owner, is not
+        mkdir(lock); write(joinpath(lock, "owner"), "pid $pid host another-computer time 0\n")
+        refusal = try lock_directory(folder); nothing catch e; e end
+        @test refusal isa ArgumentError && occursin("another-computer", refusal.msg) && occursin(".lock", refusal.msg)
+        rm(joinpath(lock, "owner"))
+        refusal = try lock_directory(folder); nothing catch e; e end
+        @test refusal isa ArgumentError && occursin("unknown run", refusal.msg)
+        rm(lock; recursive = true)
     end
 end
 
@@ -844,14 +895,20 @@ end
         @test !moments_complete(file, 4)
         write(file, UInt8[])                                              # empty
         @test !moments_complete(file, 4)
+        write(file, zeros(4))                                             # full size but zeros (power failure after the rename)
+        @test !moments_complete(file, 4)
+        @test write_moments(file, μ) == file && moments_complete(file, 4)  # an existing file is replaced
+        @test readdir(directory) == ["mu_0001.bin"]
         # claim_directory: the refusal names the keys that differ, or the order
         folder = joinpath(directory, "run")
-        claim_directory(folder, "a 1\nb 2\n")
+        claim_directory(folder, "a 1\nb 2\n"; lock = false)
         write_moments(joinpath(folder, "mu_0001.bin"), μ)
-        refusal = try claim_directory(folder, "b 2\na 1\n"); nothing catch e; e end
+        refusal = try claim_directory(folder, "b 2\na 1\n"; lock = false); nothing catch e; e end
         @test refusal isa ArgumentError && occursin("another order", refusal.msg)
-        refusal = try claim_directory(folder, "a 1\nb 2\nc 3\n"); nothing catch e; e end
-        @test refusal isa ArgumentError && occursin("c", refusal.msg)
+        refusal = try claim_directory(folder, "a 1\nb 2\nc 3\n"; lock = false); nothing catch e; e end
+        @test refusal isa ArgumentError && occursin("(differing in meta.txt: c)", refusal.msg)
+        refusal = try claim_directory(folder, "a 1\nb 3\n"; lock = false); nothing catch e; e end
+        @test refusal isa ArgumentError && occursin("(differing in meta.txt: b)", refusal.msg)
     end
     # run_jobs: all jobs, the time budget, and the stop at the first error
     seen = Threads.Atomic{Int}(0)
@@ -873,6 +930,15 @@ end
     end
     @test failure isa CapturedException && occursin("job 1 fails", sprint(showerror, failure))
     @test started[] < 200                                               # later jobs were not started
+    # the jobs are handed out one at a time: two long jobs at the front run on different tasks
+    if Threads.threadpoolsize() ≥ 2
+        runner = Vector{UInt}(undef, 16)
+        @test run_jobs(1:16) do i
+            runner[i] = objectid(current_task())
+            sleep(i ≤ 2 ? 0.3 : 0.01)
+        end == 16
+        @test runner[1] != runner[2]
+    end
     # command-line arguments and meta lines of the drivers
     include(joinpath(@__DIR__, "..", "examples", "kernel_argument.jl"))
     arguments = ["8000", "eta=0.02", "20", "m=4"]
@@ -984,9 +1050,12 @@ end
         end
         D = blockdiag(sparse(ComplexF64[0.1 0.2; 0.2 0.1]), sparse(ComplexF64[0.3;;]))
         @test_throws ArgumentError chebyshev_moments(gpu_matrix(SlicedELL(D; reach = [1])), [3], 4)   # row 3 is not stored
-        # a launch with more start orbitals than the kernel's blocks allow is refused, not attempted
-        many = [o for s in 1:12 for o in orbitals(s)]
-        @test_throws ArgumentError chebyshev_moments(gpu_matrix(SlicedELL(H̃)), many, 4)
+        # more than six start orbitals: the kernel is compiled for blocks of 1024 threads (it spills
+        # registers instead of failing at launch) and gives the same moments as the CPU
+        seven = [o for s in 1:4 for o in orbitals(s)][1:7]
+        G = gpu_matrix(SlicedELL(H̃))
+        @test chebyshev_moments(G, seven, 51) ≈ chebyshev_moments(H̃, seven, 51) atol = 1e-11
+        CUDA.unsafe_free!(G)
         # the drivers: a tiny line cut (6 momenta) with resume, refusals and the stop at an error
         include(joinpath(@__DIR__, "..", "examples", "production_linecut_gpu.jl"))
         include(joinpath(@__DIR__, "..", "examples", "choose_W.jl"))
@@ -1000,6 +1069,13 @@ end
             @test all(name -> filesize(joinpath(folder, name)) == 8 * 64, files)
             μ₃ = read!(joinpath(folder, "mu_0003.bin"), zeros(64))
             @test run(; directory = folder) == 0                          # resume: nothing left to do
+            @test run(; directory = folder, drop = 0, W = 1 // 4) == 0     # numbers are written as Float64
+            @test !isdir(joinpath(folder, ".lock"))                       # the lock is released
+            lock_directory(folder)                                        # a second run at the same time is refused
+            @test_throws ArgumentError run(; directory = folder)
+            unlock_directory(folder)
+            write(joinpath(folder, "mu_0002.bin"), zeros(64))             # zeros (power failure): computed again
+            @test run(; directory = folder) == 1
             write(joinpath(folder, "mu_0003.bin"), μ₃[1:10])              # a file cut short is computed again
             @test run(; directory = folder) == 1
             @test read!(joinpath(folder, "mu_0003.bin"), zeros(64)) ≈ μ₃ atol = 1e-12
@@ -1007,8 +1083,9 @@ end
             @test_throws ArgumentError run(; directory = folder, consumers = 0)
             # ‖Ĥ_q‖_∞ > B_H: the first error stops the run and is thrown; no temporary file is left
             other = joinpath(directory, "small_B_H")
-            @test_throws Exception run(; directory = other, B_H = 0.5)
-            @test !any(name -> occursin(".tmp", name), readdir(other))
+            failure = try run(; directory = other, B_H = 0.5); nothing catch e; e end
+            @test failure isa CapturedException && occursin("exceeds B_H = 0.5", sprint(showerror, failure))
+            @test filter(name -> name != "meta.txt", readdir(other)) == []  # no moments, no temporary file, no lock
             # choose_W writes into a claimed folder and refuses one with other parameters
             sweep = joinpath(directory, "sweep")
             result = Base.invokelatest(choose_W; set = 1, L = 6.0, P = 64, candidates = (0.2,), W_ref = 0.25, Nq = 1,
@@ -1016,10 +1093,12 @@ end
             @test result.choice == (maximum(result.difference) ≤ result.floor ? 0.2 : 0.25)   # the selection rule
             @test isfile(joinpath(sweep, "mu_W0.200000_q0001.bin")) && isfile(joinpath(sweep, "mu_W0.250000_q0005.bin"))
             @test occursin("chosen_W", read(joinpath(sweep, "result.txt"), String))
+            @test !isdir(joinpath(sweep, ".lock"))
             @test_throws ArgumentError Base.invokelatest(choose_W; set = 1, L = 7.0, P = 64, candidates = (0.2,), W_ref = 0.25,
                                        Nq = 1, momenta = 1:2:5, log = devnull, directory = sweep)
             @test_throws ArgumentError Base.invokelatest(choose_W; set = 1, L = 6.0, P = 64, candidates = (0.2,), W_ref = 0.25,
                                        Nq = 1, momenta = 1:2:5, log = devnull, directory = folder)          # a line-cut folder
+            @test !isdir(joinpath(folder, ".lock"))
         end
     else
         @info "GPU test set skipped: CUDA.jl is not in the environment, or no device is usable"

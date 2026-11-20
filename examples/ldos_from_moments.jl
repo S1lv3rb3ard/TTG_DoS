@@ -26,11 +26,11 @@ open(output, "w") do io
     println(io, "# ticks: ", meta["ticks"], " P ", P′, " resolution_eV ", kpm_resolution(s, P′, kernel),
         kernel isa DeltaChebyshev ? " kernel delta-Chebyshev m $(length(kernel.z)) truncation_bound_per_eV $(maximum(truncation_bound(kernel, s, E, P′)))" :
         kernel isa Gaussian ? " kernel Gaussian truncation_bound_per_eV $(maximum(truncation_bound(kernel, s, E, P′)))" : "")
-    println(io, "# run: ", join(("$k $(meta[k])" for k in ("theta", "W", "L", "B_H", "s", "interlayer", "precision", "drop_eV") if haskey(meta, k)), "; "),
+    println(io, "# run: ", join(("$k $(meta[k])" for k in ("theta", "W", "L", "Nq", "B_H", "s", "interlayer", "varsigma", "precision", "drop_eV") if haskey(meta, k)), "; "),
         haskey(meta, "interlayer") ? "" : "; interlayer fang_kaxiras (no interlayer line in meta.txt)")
     for i in eachindex(arclength)
         name = joinpath(directory, @sprintf("mu_%04d.bin", i))
-        moments_complete(name, P) || continue                 # missing, or cut off by an interruption
+        moments_complete(name, P) || continue                 # missing, cut off, or all zeros (not finished)
         μ = Vector{Float64}(undef, P); read!(name, μ)
         println(io, i, " ", arclength[i], " ", join(kpm_density(view(μ, 1:P′), s, E; kernel) ./ 6, " "))
     end

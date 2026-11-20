@@ -56,7 +56,7 @@ src/posteriori.jl       a posteriori diagnostics of the truncation
 src/reference.jl        slow reference implementations used by the tests
 ext/UnrelaxedTTGCUDAExt.jl   gpu_matrix and chebyshev_moments on the GPU: kernel on SlicedELL, and CUSPARSE (loaded with CUDA.jl)
 examples/               drivers, see below
-test/runtests.jl        7342 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
+test/runtests.jl        7377 tests; the GPU test set runs when CUDA.jl is installed and a GPU is found
 ```
 
 ## Installation
@@ -120,11 +120,12 @@ The Chebyshev moments μ_n do not depend on how the density is regularised. `kpm
   peak for m = 6), so the density can be negative next to a sharp peak.
 
 ```julia
-μ = result.μ[1, :]                                   # or read from mu_0001.bin
+# continuing the example of "Use on the CPU" (model, E, B_H and result from there)
+μ = result.μ[1, :]                                   # moments of the first momentum (or read from mu_0001.bin)
 K = DeltaChebyshev(0.016, 6)                         # η = 16 meV, order 6
 F = kpm_density(μ, result.s, E; kernel = K) ./ 6
 b = truncation_bound(K, result.s, E, length(μ))      # bound for the terms n ≥ P left out, per unit μ₀ (1/eV)
-result = momentum_ldos(model, path, E; W, L, P, B_H, kernel = K)     # the same in one call
+result_K = momentum_ldos(model, linecut(stack, 60), E; W = 0.4742, L = 19.40, P = 2000, B_H, kernel = K)   # all momenta in one call
 ```
 
 The series of K_η needs P of the order of 1/(sη) terms: the terms decay like exp(−n sη/√(1 − (sE)²)).
@@ -290,7 +291,11 @@ Output, one folder per run:
 - `mu_0001.bin`, …: the `P` moments of each momentum as raw `Float64`.
 
 A run that is stopped continues from the files that exist and hold all `P` moments
-(`moments_complete`; a cut-off file is computed again). A folder that holds moments is accepted
+(`moments_complete`; a file that is cut off or all zeros is computed again). Each file is written
+to a temporary file, flushed to the disk and then renamed (`write_moments`), so a power failure
+leaves no partial file. While a run is going, its folder is locked (`directory/.lock`,
+`lock_directory`), so a second run started in the same folder is refused; a lock left behind by a
+process that no longer runs on the same computer is taken over. A folder that holds moments is accepted
 only if its `meta.txt` equals that of the present call (`claim_directory`); otherwise the call
 throws an `ArgumentError` that names the differing parameters and writes nothing. If a task fails
 (GPU out of memory, ‖Ĥ_q‖_∞ > B_H, …), the error is written to the log, the other tasks stop after
@@ -417,4 +422,5 @@ for P ≤ 401: largest moment difference 1.2 × 10⁻¹⁴ in `ComplexF64` and 1
 - The W and L of sets 1 and 2 in `ANGLE_SETS` are the manuscript's values; (5.3)–(5.5) evaluated
   for a = 1.42√3 Å give 0.4748, 19.43 and 0.3777, 30.60 (fourth-digit difference).
 - `claim_directory` compares `meta.txt` as text, so a folder is refused when a parameter is passed
-  with other digits than those written there, even if the difference is rounding only.
+  with other digits than those written there, even if the difference is rounding only (since
+  0.7.2 the GPU driver writes W, L, B_H, drop and ς as `Float64`, so `drop = 0` and `0.0` agree).

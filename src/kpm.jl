@@ -195,15 +195,18 @@ c_n(E) only by aliasing of the coefficients c_m with m > 3P. The sum is evaluate
 
     ρ(E) = (1/M) ∑_j δ_ε(E − x_j/s) g_j,      g_j = μ_0 + 2 ∑_{n=1}^{P−1} μ_n T_n(x_j),
 
-with g_j computed once for all energies and only at the nodes with |E − x_j/s| ≤ 40ε for some E
-(at the other nodes δ_ε underflows to zero). [`truncation_bound`](@ref) bounds the terms left out
+with g_j computed once for all energies, at the nodes from the lowest to the highest with
+|E − x_j/s| ≤ 40ε for some E (nodes outside that range are skipped, where δ_ε underflows to zero for
+every E; for a wide energy grid this is nearly all M nodes). [`truncation_bound`](@ref) bounds the terms left out
 and the aliasing together; P sε ≥ 4 makes both small. `E` is not restricted.
 """
-kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E; kernel::Kernel = Jackson()) =
-    kpm_density!(ρ, μ, s, E, kernel)
+function kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E; kernel::Kernel = Jackson())
+    s > 0 || throw(ArgumentError("the scale s = $s must be positive"))
+    return kpm_density!(ρ, μ, s, E, kernel)
+end
 
 kpm_density(μ::AbstractVector, s::Real, E; kernel::Kernel = Jackson()) =
-    kpm_density!(zeros(length(E)), μ, s, E, kernel)
+    kpm_density!(zeros(length(E)), μ, s, E; kernel)
 
 function kpm_density!(ρ::AbstractVector, μ::AbstractVector, s::Real, E, ::Jackson)
     g = jackson(length(μ))
@@ -393,7 +396,8 @@ t_m = T_m(H̃) e_c, the doubling relations
     μ_{2m} = 2⟨t_m, t_m⟩ − μ₀,      μ_{2m+1} = 2⟨t_{m+1}, t_m⟩ − μ₁
 
 give two moments per matrix–vector product. All start vectors are advanced
-together as the columns of a dense matrix.
+together as the columns of a dense matrix. The inner products are computed in the
+element type of H̃ (for ComplexF32 in single precision; the GPU method sums in Float64).
 """
 function chebyshev_moments(H̃::AbstractMatrix{<:Number}, orbitals::AbstractVector{<:Integer}, P::Integer)
     P ≥ 1 || throw(ArgumentError("P must be a positive integer"))

@@ -54,7 +54,7 @@ end
     gpu_format(H, present, s, B_H; precision, drop) -> S
 
 The matrix of the recurrence on the CPU side: the entries with |h| ≤ `drop` (eV) removed, scaled to
-s(H − c) with the scale s and the shift of `scaled`, in the sliced ELLPACK format with the rows
+sH by `scaled` (no shift; it checks ‖H‖_∞ ≤ B_H), in the sliced ELLPACK format with the rows
 reachable from the zero-label orbitals `present` (`SlicedELL`), in the arithmetic `precision`.
 """
 gpu_format(H, present, s, B_H; precision = ComplexF32, drop = 1e-5) =
@@ -145,8 +145,8 @@ Keyword arguments: `set` (angle triple, `triple_parameters`); `L`, `P`; `candida
 than `W_ref`); `W_ref`; `Nq` (default 60); `momenta` (default every 30th point); `floor_momenta`
 (default the first and the middle one of `momenta`); `precision` (default `ComplexF32`); `drop`
 (eV, default 10⁻⁵); `E` (default 4001 points of [−0.2, 0.2] eV); `log`; `directory` (if given, it is
-claimed with `claim_directory` before the sweep, so a folder with moments of other parameters is
-refused; the parameters go to `meta.txt`, the moments of every W to `mu_W<W, six decimals>_q<index>.bin`
+locked for the call (`lock_directory`) and claimed with `claim_directory` before the sweep, so a
+second run in it at the same time and a folder with moments of other parameters are refused; the parameters go to `meta.txt`, the moments of every W to `mu_W<W, six decimals>_q<index>.bin`
 as soon as they are computed, and floor and choice to `result.txt`); `ahead` (default 3, momenta prepared in
 advance on CPU threads).
 
@@ -155,7 +155,17 @@ candidates), `W_ref`, `momenta`, `difference` (candidates × momenta), `labels` 
 (candidates and, in the last row, W_ref × momenta), `B_H`, `s`. Pass `B_H` at full precision to
 `linecut_gpu` to run the line cut at the same scale.
 """
-function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int = 60,
+function choose_W(; directory = nothing, kwargs...)
+    directory === nothing && return run_choose_W(; kwargs...)
+    lock_directory(directory)                            # one run per folder at a time
+    try
+        return run_choose_W(; directory, kwargs...)
+    finally
+        unlock_directory(directory)
+    end
+end
+
+function run_choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int = 60,
                   momenta = 1:30:(5Nq + 1), floor_momenta = (first(momenta), momenta[cld(length(momenta), 2)]),
                   precision::Type = ComplexF32, drop::Real = 1e-5,
                   E = range(-0.2, 0.2; length = 4001), log::IO = stdout, directory = nothing, kernel = Jackson(),
@@ -182,7 +192,7 @@ function choose_W(; set::Int, L::Real, P::Int, candidates, W_ref::Real, Nq::Int 
             println(io, "drop_eV ", drop); println(io, "tau 8.5"); println(io, "delta 6.5")
             interlayer_meta(io, interlayer)
         end
-        claim_directory(directory, meta)                 # throws if the folder holds moments of other parameters
+        claim_directory(directory, meta; lock = false)   # locked by choose_W; throws if the folder holds moments of other parameters
     end
     save(W, i, μ) = directory === nothing || write_moments(joinpath(directory, @sprintf("mu_W%.6f_q%04d.bin", W, i)), μ)
     floor_values = Dict{Int,Float64}()

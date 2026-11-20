@@ -43,6 +43,7 @@ end
 The path through `vertices` with `Nq` steps per segment.
 """
 function linecut(vertices::AbstractVector{<:Vec2{T}}, Nq::Integer; labels = string.(eachindex(vertices))) where {T}
+    Nq ≥ 1 || throw(ArgumentError("Nq = $Nq: a line cut needs at least one step per segment"))
     q, s, ticks = [vertices[1]], [zero(T)], [zero(T)]
     for i in 1:length(vertices)-1
         a, b = vertices[i], vertices[i+1]
@@ -230,6 +231,7 @@ figures. `kernel` as in [`moire_dos`](@ref). `result`: `E`, `ρ`, `μ`, `s`, `B_
 """
 function brillouin_dos(model::Model{T}, E; W, L, N::Integer, P::Integer, δ_s::Real = 0.05,
         B_H::Union{Nothing,Real} = nothing, kernel::Kernel = Jackson()) where {T}
+    N ≥ 1 || throw(ArgumentError("the grid needs N ≥ 1 points per direction"))
     stack = model.stack
     Wⱼ, Lⱼ = triple(T, W), triple(T, L)
     s, bound = kpm_scale(model, E; δ_s, B_H, kernel)
